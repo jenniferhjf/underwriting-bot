@@ -474,6 +474,7 @@ def render_tutorial(user_settings):
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
+        # Progress indicator
         progress_html = '<div style="display: flex; gap: 0.5rem; margin-bottom: 2rem; justify-content: center;">'
         for i in range(len(TUTORIAL_STEPS)):
             color = "#3b82f6" if i < step else "#e5e7eb"
@@ -481,14 +482,11 @@ def render_tutorial(user_settings):
         progress_html += '</div>'
         st.markdown(progress_html, unsafe_allow_html=True)
         
-        st.markdown(f"""
-            <div style="background: white; border-radius: 1rem; padding: 3rem; box-shadow: 0 10px 40px rgba(0,0,0,0.1);">
-                <h1 style="color: #1e40af; margin-bottom: 1.5rem;">{step_data['title']}</h1>
-                <div style="color: #374151; line-height: 1.8; font-size: 1.1rem;">
-                    {step_data['content']}
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        # Title
+        st.markdown(f"## {step_data['title']}")
+        
+        # Content (using Streamlit's native markdown)
+        st.markdown(step_data['content'])
         
         st.markdown("<br>", unsafe_allow_html=True)
         
