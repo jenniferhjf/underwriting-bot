@@ -384,6 +384,7 @@ class ConversationManager:
 # ============================================================================
 
 def generate_cot_response(query, retrieved_docs):
+    """CoT模式 - 完整的5步推理"""
     if not retrieved_docs:
         return "⚠️ **No Relevant Cases Found**\n\nPlease add documents to the knowledge base or try a different query."
     docs_text = ""
@@ -401,9 +402,66 @@ Decision: {doc["decision"]} | Premium: ${doc["premium"]:,} | Risk: {doc["risk_le
 Summary: {doc["case_summary"]}
 Insights: {doc["key_insights"]}
 """
-    messages = [{"role":"system","content":"You are Mr. X's AI underwriting assistant. Think step-by-step using CoT framework."},
-                {"role":"user","content":f'Query: "{query}"\n\nRetrieved Cases:\n{docs_text}\n\nAnalyze and provide: Decision + Premium Range + Sources'}]
-    return call_deepseek_api(messages)
+    system_prompt = """You are Mr. X's AI underwriting assistant.
+
+Use this Chain-of-Thought framework for analysis:
+
+**Step 1: Extract Key Tags**
+- Identify equipment, industry, timeline from query
+
+**Step 2: Analyze Retrieved Precedents**
+- Review each relevant case
+- Note similarities and differences
+
+**Step 3: Check Recency & Applicability**
+- Prioritize recent cases
+- Consider market changes
+
+**Step 4: Identify Decision Patterns**
+- Look for consistent approvals/declines
+- Identify risk factors
+
+**Step 5: Recommend with Rationale**
+- Provide clear decision
+- Suggest premium range
+- Cite specific precedents
+
+Format your response with clear sections for each step."""
+    
+    messages = [
+        {"role":"system","content": system_prompt},
+        {"role":"user","content":f'Query: "{query}"\n\nRetrieved Cases:\n{docs_text}\n\nProvide step-by-step analysis.'}
+    ]
+    return call_deepseek_api(messages, temperature=0.3, max_tokens=2500)
+
+def generate_quick_response(query, retrieved_docs):
+    """快速模式 - 直接给出结论"""
+    if not retrieved_docs:
+        return "⚠️ **No Relevant Cases Found**\n\nPlease add documents to the knowledge base or try a different query."
+    
+    docs_summary = []
+    for doc in retrieved_docs:
+        equipment = ", ".join(doc["tags"].get("equipment", []))
+        industry = ", ".join(doc["tags"].get("industry", []))
+        docs_summary.append(f"- {doc['filename']}: {doc['decision']}, ${doc['premium']:,}, {equipment}, {industry}")
+    
+    docs_text = "\n".join(docs_summary)
+    
+    system_prompt = """You are Mr. X's AI underwriting assistant.
+
+Provide a CONCISE response with:
+1. **Recommended Decision** (Approve/Decline/Conditional)
+2. **Suggested Premium Range** (with specific numbers)
+3. **Key Risk Factors** (brief bullet points)
+4. **Precedent References** (cite 2-3 most relevant cases by filename)
+
+Keep response under 200 words. Be direct and actionable."""
+    
+    messages = [
+        {"role":"system","content": system_prompt},
+        {"role":"user","content":f'Query: "{query}"\n\nRelevant Precedents:\n{docs_text}\n\nProvide quick recommendation.'}
+    ]
+    return call_deepseek_api(messages, temperature=0.2, max_tokens=800)
 
 # ============================================================================
 # CSS
@@ -581,32 +639,138 @@ def render_app(kb, conv_mgr, user_settings):
 
 def render_chat_page(kb, conv_mgr):
     current_conv = conv_mgr.get_conversation(st.session_state.current_conv_id)
-    if not current_conv: st.error("Conversation not found"); return
-    st.title(f"💬 {current_conv['title']}")
+    if not current_conv: 
+        st.error("Conversation not found")
+        return
+    
+    # Title with mode selector
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title(f"💬 {current_conv['title']}")
+    with col2:
+        # Initialize response mode if not exists
+        if "response_mode" not in st.session_state:
+            st.session_state.response_mode = "CoT"
+        
+        response_mode = st.selectbox(
+            "Response Mode",
+            ["🧠 CoT (Detailed)", "⚡ Quick"],
+            index=0 if st.session_state.response_mode == "CoT" else 1,
+            help="CoT: Step-by-step reasoning (slower, detailed)\nQuick: Direct answer (faster, concise)",
+            key="mode_selector"
+        )
+        st.session_state.response_mode = "CoT" if "CoT" in response_mode else "Quick"
+    
+    # Display existing messages
     for msg in current_conv["messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-    if prompt := st.chat_input("Ask about underwriting cases..."):
+            
+            # If message has retrieved docs metadata, show clickable references
+            if msg["role"] == "assistant" and "retrieved_docs" in msg:
+                render_clickable_references(msg["retrieved_docs"], kb)
+    
+    # Chat input
+    if prompt := st.chat_input("Ask about underwriting cases...", key="chat_input_field"):
+        if st.session_state.tour_active and st.session_state.tour_step == 4:
+            st.session_state.tour_step += 1
+        
+        # Add user message
         conv_mgr.add_message(st.session_state.current_conv_id, "user", prompt)
         with st.chat_message("user"):
             st.markdown(prompt)
+        
+        # Generate AI response
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Searching..."):
-                retrieved = kb.search_documents(prompt, top_k=3)
-                resp = generate_cot_response(prompt, retrieved)
+            with st.spinner(f"{'🧠 Analyzing with CoT...' if st.session_state.response_mode == 'CoT' else '⚡ Generating quick response...'}"):
+                retrieved = kb.search_documents(prompt, top_k=5)
+                
+                # Choose response mode
+                if st.session_state.response_mode == "CoT":
+                    resp = generate_cot_response(prompt, retrieved)
+                    mode_label = "🧠 Chain-of-Thought Analysis"
+                else:
+                    resp = generate_quick_response(prompt, retrieved)
+                    mode_label = "⚡ Quick Response"
+                
+                # Display response with mode indicator
+                st.caption(mode_label)
                 st.markdown(resp)
+                
+                # Show clickable references
                 if retrieved:
-                    with st.expander(f"📚 {len(retrieved)} Retrieved Documents"):
-                        for d in retrieved:
-                            st.markdown(f"**{d['doc_id']}** - {d['filename']}")
-                            tags_html = ""
-                            for t in d["tags"].get("equipment", []): tags_html += f'<span class="tag-equipment">🔧 {t}</span>'
-                            for t in d["tags"].get("industry", []): tags_html += f'<span class="tag-industry">🏭 {t}</span>'
-                            for t in d["tags"].get("timeline", []): tags_html += f'<span class="tag-timeline">📅 {t}</span>'
-                            st.markdown(tags_html, unsafe_allow_html=True)
-                            st.markdown("---")
+                    render_clickable_references(retrieved, kb)
+        
+        # Save message with metadata
+        message_with_meta = {
+            "role": "assistant",
+            "content": resp,
+            "retrieved_docs": [doc["doc_id"] for doc in retrieved],
+            "mode": st.session_state.response_mode
+        }
         conv_mgr.add_message(st.session_state.current_conv_id, "assistant", resp)
+        
+        # Store metadata separately (for clickable links)
+        if "message_metadata" not in st.session_state:
+            st.session_state.message_metadata = {}
+        st.session_state.message_metadata[len(current_conv["messages"])] = {
+            "retrieved_docs": retrieved
+        }
+        
         st.rerun()
+
+def render_clickable_references(doc_ids_or_docs, kb):
+    """Render clickable document references that jump to KB page"""
+    
+    # Handle both doc IDs and full doc objects
+    if doc_ids_or_docs and isinstance(doc_ids_or_docs[0], str):
+        # It's a list of doc IDs, need to fetch full docs
+        docs = [doc for doc in kb.metadata if doc["doc_id"] in doc_ids_or_docs]
+    else:
+        # It's already full doc objects
+        docs = doc_ids_or_docs
+    
+    if not docs:
+        return
+    
+    st.markdown("---")
+    st.markdown(f"**📚 Referenced Documents ({len(docs)}):**")
+    
+    # Create clickable document cards
+    for i, doc in enumerate(docs, 1):
+        with st.expander(f"{i}. {SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}", expanded=False):
+            # Document info
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"**ID:** `{doc['doc_id']}`")
+            with col2:
+                decision = doc.get("decision", "N/A")
+                emoji = {"Approved": "🟢", "Declined": "🔴", "Conditional": "🟡", "Pending": "⚪"}.get(decision, "⚪")
+                st.markdown(f"**Decision:** {emoji} {decision}")
+            with col3:
+                st.markdown(f"**Premium:** ${doc.get('premium', 0):,}")
+            
+            # Tags
+            tags_html = ""
+            for t in doc["tags"].get("equipment", []): 
+                tags_html += f'<span class="tag-equipment">🔧 {t}</span>'
+            for t in doc["tags"].get("industry", []): 
+                tags_html += f'<span class="tag-industry">🏭 {t}</span>'
+            for t in doc["tags"].get("timeline", []): 
+                tags_html += f'<span class="tag-timeline">📅 {t}</span>'
+            if tags_html:
+                st.markdown(tags_html, unsafe_allow_html=True)
+            
+            # Summary
+            if doc.get("case_summary"):
+                st.info(doc["case_summary"][:200] + "..." if len(doc.get("case_summary", "")) > 200 else doc["case_summary"])
+            
+            # Jump to KB button
+            if st.button(f"🔗 View in Knowledge Base", key=f"jump_kb_{doc['doc_id']}_{i}", use_container_width=True):
+                # Set filter to show this specific document
+                st.session_state.current_page = "kb"
+                st.session_state.kb_search_query = doc["filename"]
+                st.rerun()
 
 def render_kb_page(kb):
     st.title("📄 Knowledge Base")
@@ -624,8 +788,15 @@ def render_kb_page(kb):
     col1, col2 = st.columns([2, 1])
     
     with col1:
+        # Check if jumping from chat with search query
+        default_search = st.session_state.get("kb_search_query", "")
+        if default_search:
+            # Clear the session state after using it
+            st.session_state.kb_search_query = ""
+        
         search_query = st.text_input(
             "🔎 Search by filename or content",
+            value=default_search,
             placeholder="e.g., 'ABC Oil', 'turbine', 'boiler'...",
             help="Search across filenames, summaries, and key insights"
         )
