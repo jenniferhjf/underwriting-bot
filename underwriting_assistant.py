@@ -3,10 +3,9 @@ Underwriting Assistant - Professional RAG+CoT System
 专业承保助手 - RAG+CoT系统
 
 Updates (2025-11-19):
-- 移除 Workspace 概念：所有文档进入统一知识库，避免多 Workspace 操作干扰
-- 聊天支持多会话：左侧像 GPT 一样可以新建对话、切换对话
-- 聊天记录持久化：每次对话的聊天内容自动保存在本地 data/chats 目录
-- 外观切换（Light/Dark）& Documents 预览逻辑保留
+- 取消 Workspace 切换功能，只保留一个默认知识库（用户无感知）
+- 保留左侧导航条：上方主题切换 + 中间多会话列表 + 下方知识库统计
+- 每次聊天记录本地持久化，并支持像 GPT 一样在左侧新建/切换会话
 """
 
 import streamlit as st
@@ -25,14 +24,14 @@ import pandas as pd
 # CONFIGURATION
 # ============================================================================
 
-# DeepSeek API Configuration（建议用环境变量）
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+# DeepSeek API Configuration（你也可以改成用环境变量）
+DEEPSEEK_API_KEY = "sk-99bba2ce117444e197270f17d303e74f"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
 
 # Directories
 DATA_DIR = "data"
-WORKSPACES_DIR = os.path.join(DATA_DIR, "workspaces")  # 仍复用 Workspace 逻辑，但只用一个 default
+WORKSPACES_DIR = os.path.join(DATA_DIR, "workspaces")  # 内部用一个 default workspace
 EMBEDDINGS_DIR = os.path.join(DATA_DIR, "embeddings")
 CHATS_DIR = os.path.join(DATA_DIR, "chats")
 
@@ -62,8 +61,7 @@ TAG_OPTIONS = {
     "timeline": ["2025-Q4", "2025-Q3", "2025-Q2", "2025-Q1", "2024", "2023", "Earlier"]
 }
 
-# 默认使用一个 Workspace 名称
-DEFAULT_WORKSPACE_NAME = "default"
+DEFAULT_WORKSPACE_NAME = "default"  # 只用这一个知识库
 
 # ============================================================================
 # SYSTEM INSTRUCTION (CoT)
@@ -89,11 +87,20 @@ Output: Provide decision + premium + sources"""
 
 def call_deepseek_api(messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 2000) -> str:
     if not DEEPSEEK_API_KEY:
-        return "❌ API Error: DEEPSEEK_API_KEY is not set. Please configure your API key."
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
-    payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        return "❌ API Error: DEEPSEEK_API_KEY is not set."
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
     try:
-        resp = requests.post(f"{DEEPSEEK_API_BASE}/chat/completions", headers=headers, json=payload, timeout=60)
+        resp = requests.post(f"{DEEPSEEK_API_BASE}/chat/completions",
+                             headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
@@ -132,7 +139,7 @@ def extract_text_from_file(file_path: str, file_format: str) -> str:
     elif file_format == "txt":
         return extract_text_from_txt(file_path)
     elif file_format in ["xlsx", "xls", "png", "jpg", "jpeg"]:
-        # 这些类型在右侧预览时做专门处理，这里返回空字符串
+        # 这些类型右侧预览时处理，这里不抽取
         return ""
     return "Unsupported format for text extraction"
 
@@ -177,9 +184,12 @@ Rules:
 def auto_annotate_by_llm(extracted_text: str, filename: str) -> Dict[str, Any]:
     user_prompt = f"FILENAME: {filename}\nTEXT:\n{(extracted_text or '')[:4000]}"
     content = call_deepseek_api(
-        messages=[{"role": "system", "content": AUTO_ANNOTATE_SYSTEM},
-                  {"role": "user", "content": user_prompt}],
-        temperature=0.2, max_tokens=700
+        messages=[
+            {"role": "system", "content": AUTO_ANNOTATE_SYSTEM},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.2,
+        max_tokens=700
     )
     try:
         cleaned = content.strip()
@@ -192,7 +202,9 @@ def auto_annotate_by_llm(extracted_text: str, filename: str) -> Dict[str, Any]:
     except Exception:
         data = {
             "tags": {"equipment": ["Other"], "industry": ["Other"], "timeline": ["Earlier"]},
-            "decision": "Pending", "premium": 0, "risk_level": "Medium",
+            "decision": "Pending",
+            "premium": 0,
+            "risk_level": "Medium",
             "case_summary": "Auto-tagging failed. Placeholder values used.",
             "key_insights": "Please re-run auto-tagging if needed."
         }
@@ -208,7 +220,7 @@ def auto_annotate_by_llm(extracted_text: str, filename: str) -> Dict[str, Any]:
     return data
 
 # ============================================================================
-# WORKSPACE（仅保留一个 default，隐藏多 Workspace 功能）
+# WORKSPACE（内部只用一个 default）
 # ============================================================================
 
 class Workspace:
@@ -255,11 +267,18 @@ class Workspace:
         full_text = f"{case_summary} {key_insights} {extracted_text_preview[:1000]}"
         embedding = generate_embedding(full_text)
         doc_meta = {
-            "doc_id": doc_id, "filename": uploaded_file.name, "file_format": ext,
-            "file_path": file_path, "file_size_kb": uploaded_file.size / 1024,
-            "upload_date": datetime.now().isoformat(), "tags": tags,
-            "decision": decision, "premium": premium, "risk_level": risk_level,
-            "case_summary": case_summary, "key_insights": key_insights,
+            "doc_id": doc_id,
+            "filename": uploaded_file.name,
+            "file_format": ext,
+            "file_path": file_path,
+            "file_size_kb": uploaded_file.size / 1024,
+            "upload_date": datetime.now().isoformat(),
+            "tags": tags,
+            "decision": decision,
+            "premium": premium,
+            "risk_level": risk_level,
+            "case_summary": case_summary,
+            "key_insights": key_insights,
             "extracted_text_preview": extracted_text_preview[:500]
         }
         self.metadata.append(doc_meta)
@@ -375,7 +394,7 @@ def update_chat_session_meta(session_id: str, title: str | None = None):
     for s in sessions:
         if s["id"] == session_id:
             s["updated_at"] = now
-            if title and s.get("title") in ["New chat", "", None]:
+            if title and (s.get("title") in ["New chat", "", None]):
                 s["title"] = title
             changed = True
             break
@@ -388,7 +407,14 @@ def update_chat_session_meta(session_id: str, title: str | None = None):
 
 def generate_cot_response(query: str, retrieved_docs: List[Dict[str, Any]]) -> str:
     if not retrieved_docs:
-        return "⚠️ **No Relevant Cases Found**\n\nPlease add documents to the knowledge base or try a different query."
+        # 没有文档时也给一个兜底回答
+        return call_deepseek_api(
+            [
+                {"role": "system", "content": SYSTEM_INSTRUCTION},
+                {"role": "user", "content": f"Query: {query}\n\nNo retrieved cases available. Please answer based on general underwriting principles."}
+            ]
+        )
+
     docs_text = ""
     for doc in retrieved_docs:
         equipment = ", ".join(doc["tags"].get("equipment", []))
@@ -452,7 +478,6 @@ def inject_css(appearance: str):
         .stApp { background-color: var(--bg-app); color: var(--text-primary); }
         .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
         .sub-header  { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .workspace-card { background: var(--card-bg); padding: 1.0rem; border-radius: 0.5rem; box-shadow: var(--shadow); color: var(--text-primary); }
         .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color:#0b1220; }
         .tag-equipment { background-color: #93c5fd; }
         .tag-industry  { background-color: #86efac; }
@@ -479,7 +504,6 @@ def inject_css(appearance: str):
         .stApp { background-color: var(--bg-app); color: var(--text-primary); }
         .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
         .sub-header  { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .workspace-card { background: var(--card-bg); padding: 1.0rem; border-radius: 0.5rem; box-shadow: var(--shadow); color: var(--text-primary); }
         .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color: var(--text-primary); }
         .tag-equipment { background-color: #dbeafe; }
         .tag-industry  { background-color: #dcfce7; }
@@ -496,70 +520,79 @@ def inject_css(appearance: str):
 # ============================================================================
 
 def main():
-    st.set_page_config(page_title="Underwriting Assistant", page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(
+        page_title="Underwriting Assistant",
+        page_icon="🤖",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
 
-    # ===== Theme =====
-    with st.sidebar:
-        st.markdown("### 🎨 Appearance")
-        appearance = st.radio("Theme", ["Light", "Dark"], horizontal=True, key="appearance_choice")
-    inject_css(appearance)
-
-    # Instantiate default workspace (single knowledge base)
+    # === 侧边栏：主题 + 会话导航 + 知识库统计 ===
     workspace = Workspace(DEFAULT_WORKSPACE_NAME)
     stats = workspace.get_stats()
 
-    # ===== Sidebar: Chat Sessions & Stats =====
     with st.sidebar:
+        # 主题
+        st.markdown("### 🎨 Appearance")
+        appearance = st.radio(
+            "Theme",
+            ["Light", "Dark"],
+            horizontal=True,
+            key="appearance_choice"
+        )
+
+        st.markdown("---")
         st.markdown("### 💬 Conversations")
 
         # 加载所有会话
         sessions = _load_chat_sessions()
         if not sessions:
-            # 没有会话时创建一个默认会话
             default_session = create_chat_session()
             sessions = _load_chat_sessions()
 
-        # 按更新时间倒序展示
-        sessions_sorted = sorted(sessions, key=lambda s: s.get("updated_at", ""), reverse=True)
+        sessions_sorted = sorted(
+            sessions,
+            key=lambda s: s.get("updated_at", ""),
+            reverse=True
+        )
 
-        # 当前会话 ID
         if "current_session_id" not in st.session_state:
             st.session_state.current_session_id = sessions_sorted[0]["id"]
 
-        # 新建对话按钮
+        # 新建对话
         if st.button("➕ New Chat"):
-            new_session = create_chat_session()
-            st.session_state.current_session_id = new_session["id"]
+            new_sess = create_chat_session()
+            st.session_state.current_session_id = new_sess["id"]
             st.session_state.messages = []
-            st.session_state.loaded_for = new_session["id"]
+            st.session_state.loaded_for = new_sess["id"]
             st.experimental_rerun()
 
-        # 会话列表（radio）
-        label_to_id = {f"{s['title']}": s["id"] for s in sessions_sorted}
+        # 会话列表（像 GPT 左侧导航）
+        label_to_id = {s["title"]: s["id"] for s in sessions_sorted}
         current_id = st.session_state.current_session_id
-        # 找到当前会话对应的 label
-        current_label = None
-        for lbl, sid in label_to_id.items():
-            if sid == current_id:
-                current_label = lbl
-                break
+        current_label = next(
+            (lbl for lbl, sid in label_to_id.items() if sid == current_id),
+            list(label_to_id.keys())[0]
+        )
         selected_label = st.radio(
             "Chats",
             options=list(label_to_id.keys()),
-            index=list(label_to_id.keys()).index(current_label) if current_label in label_to_id else 0,
+            index=list(label_to_id.keys()).index(current_label),
             key="chat_session_selector"
         )
         selected_id = label_to_id[selected_label]
 
-        # 如果切换了会话，则加载对应 messages
-        if selected_id != current_id or "messages" not in st.session_state or st.session_state.get("loaded_for") != selected_id:
+        # 切换会话时加载 messages
+        if (selected_id != current_id or
+            "messages" not in st.session_state or
+            st.session_state.get("loaded_for") != selected_id):
             st.session_state.current_session_id = selected_id
             st.session_state.messages = _load_session_messages(selected_id)
             st.session_state.loaded_for = selected_id
 
-        # Workspace 简要统计
+        # 知识库统计
         st.markdown("---")
-        st.markdown("### 📊 Knowledge Base Stats")
+        st.markdown("### 📊 Knowledge Base")
         c1, c2 = st.columns(2)
         with c1:
             st.metric("Documents", stats["total_documents"])
@@ -570,34 +603,39 @@ def main():
             for fmt, count in stats["format_distribution"].items():
                 st.write(f"{SUPPORTED_FORMATS.get(fmt, fmt)}: {count}")
 
-    # ===== Main Title =====
+    # 应用主题 CSS
+    inject_css(appearance)
+
+    # 主标题
     st.markdown('<div class="main-header">🤖 Underwriting Assistant</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">RAG + CoT | Multimodal Extraction | Vector DB</div>', unsafe_allow_html=True)
 
-    # Tabs
+    # Tabs 仍然在页面上方
     tab1, tab2, tab3 = st.tabs(["💬 Chat", "📄 Documents", "📤 Upload (Auto-Tag)"])
 
-    # ===== TAB 1: CHAT =====
+    # === TAB 1: CHAT ===
     with tab1:
         st.markdown("### 💬 Chat with AI Assistant")
 
-        if stats["total_documents"] == 0:
-            st.warning("⚠️ No documents yet. Upload in 'Upload (Auto-Tag)'. The assistant will still reply, but without case references.")
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
 
-        # 显示历史消息
+        # 展示历史消息
         for m in st.session_state.messages:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
 
-        # 用户输入
         if prompt := st.chat_input("Ask about underwriting cases..."):
-            # 追加用户消息
+            # 用户消息
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # 自动更新会话标题（仅在标题还是 New chat 时）
-            first_user_msg = next((msg["content"] for msg in st.session_state.messages if msg["role"] == "user"), "")
+            # 自动把第一条用户消息作为会话标题
+            first_user_msg = next(
+                (msg["content"] for msg in st.session_state.messages if msg["role"] == "user"),
+                ""
+            )
             short_title = (first_user_msg[:20] + "...") if len(first_user_msg) > 20 else first_user_msg
             if short_title:
                 update_chat_session_meta(st.session_state.current_session_id, title=short_title)
@@ -605,13 +643,8 @@ def main():
             # Assistant 回复
             with st.chat_message("assistant"):
                 with st.spinner("🔍 Searching knowledge base..."):
-                    retrieved = workspace.search_documents(prompt, top_k=3) if stats["total_documents"] > 0 else []
-                    resp = generate_cot_response(prompt, retrieved) if retrieved else call_deepseek_api(
-                        [
-                            {"role": "system", "content": SYSTEM_INSTRUCTION},
-                            {"role": "user", "content": f"Query: {prompt}\n\nNo retrieved cases available. Please answer based on general underwriting principles."}
-                        ]
-                    )
+                    retrieved = workspace.search_documents(prompt, top_k=3)
+                    resp = generate_cot_response(prompt, retrieved)
                     st.markdown(resp)
                     if retrieved:
                         with st.expander(f"📚 {len(retrieved)} Retrieved Documents"):
@@ -627,12 +660,12 @@ def main():
                                 st.markdown(tags_html, unsafe_allow_html=True)
                                 st.markdown("---")
 
-            # 保存 Assistant 消息 + 持久化本次会话
+            # 保存助手消息 & 持久化本会话
             st.session_state.messages.append({"role": "assistant", "content": resp})
             _save_session_messages(st.session_state.current_session_id, st.session_state.messages)
             update_chat_session_meta(st.session_state.current_session_id)
 
-    # ===== TAB 2: DOCUMENTS（单一知识库 + 左浏览右预览） =====
+    # === TAB 2: DOCUMENTS ===
     with tab2:
         st.markdown("### 📄 Knowledge Base")
         if not workspace.metadata:
@@ -640,7 +673,6 @@ def main():
         else:
             left, right = st.columns([1, 2.2])
 
-            # 左侧：知识库浏览条
             with left:
                 st.markdown("#### 📚 Knowledge Base Browser")
                 q = st.text_input("Search title/tags...", key="kb_search")
@@ -653,7 +685,8 @@ def main():
                     ql = q.lower()
                     docs = [
                         d for d in docs
-                        if (ql in d["filename"].lower() or any(ql in tag.lower() for v in d["tags"].values() for tag in v))
+                        if (ql in d["filename"].lower() or
+                            any(ql in tag.lower() for v in d["tags"].values() for tag in v))
                     ]
                 if fe:
                     docs = [d for d in docs if any(t in d["tags"].get("equipment", []) for t in fe)]
@@ -664,7 +697,10 @@ def main():
 
                 docs = sorted(docs, key=lambda d: d.get("upload_date", ""), reverse=True)
 
-                options = {f"{SUPPORTED_FORMATS.get(d['file_format'], '📎')} {d['filename']} [{d['doc_id']}]": d["doc_id"] for d in docs}
+                options = {
+                    f"{SUPPORTED_FORMATS.get(d['file_format'], '📎')} {d['filename']} [{d['doc_id']}]": d["doc_id"]
+                    for d in docs
+                }
                 selected_doc = None
                 if options:
                     selected_label_doc = st.radio("Documents", list(options.keys()), index=0, key="kb_selected")
@@ -676,14 +712,17 @@ def main():
                     st.success("Document deleted!")
                     st.experimental_rerun()
 
-            # 右侧：原件预览
             with right:
                 st.markdown("#### 👀 Preview Original")
                 if not selected_doc:
                     st.info("Select a document on the left to preview.")
                 else:
                     doc = selected_doc
-                    st.markdown(f"**{doc['filename']}**  \nID: `{doc['doc_id']}` | Format: **{doc['file_format'].upper()}** | Size: {doc['file_size_kb']:.1f} KB")
+                    st.markdown(
+                        f"**{doc['filename']}**  \n"
+                        f"ID: `{doc['doc_id']}` | Format: **{doc['file_format'].upper()}** | "
+                        f"Size: {doc['file_size_kb']:.1f} KB"
+                    )
 
                     # 下载按钮
                     with open(doc["file_path"], "rb") as f:
@@ -742,14 +781,17 @@ def main():
                     st.write("**Key Insights:**")
                     st.write(doc["key_insights"])
 
-    # ===== TAB 3: UPLOAD (Auto-Tag) =====
+    # === TAB 3: UPLOAD (Auto-Tag) ===
     with tab3:
         st.markdown("### 📤 Upload Document (Auto-Tag by Model)")
         st.caption("只需上传文件，系统会自动抽取文本并由模型进行标签与条款识别。")
 
         with st.form("upload_form_autotag"):
-            uploaded_file = st.file_uploader("Choose a document", type=list(SUPPORTED_FORMATS.keys()),
-                                             help="Supported: PDF, Word, Excel, Text, Images")
+            uploaded_file = st.file_uploader(
+                "Choose a document",
+                type=list(SUPPORTED_FORMATS.keys()),
+                help="Supported: PDF, Word, Excel, Text, Images"
+            )
             submitted = st.form_submit_button("📤 Upload & Auto-Tag")
 
         if submitted:
@@ -777,7 +819,6 @@ def main():
                         extracted_text_preview=extracted_text[:800]
                     )
 
-                    # 删除临时文件
                     try:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
