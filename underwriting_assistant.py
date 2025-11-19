@@ -19,7 +19,7 @@ from typing import List, Dict, Any
 import requests
 import PyPDF2
 from docx import Document
-import base64
+import base64  # 可留着
 
 # ============================================================================
 # CONFIGURATION
@@ -175,24 +175,31 @@ def extract_text_from_pdf(file_path):
         with open(file_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
             return " ".join([page.extract_text() or "" for page in pdf_reader.pages])
-    except: return ""
+    except:
+        return ""
 
 def extract_text_from_docx(file_path):
     try:
         doc = Document(file_path)
         return "\n".join([p.text for p in doc.paragraphs])
-    except: return ""
+    except:
+        return ""
 
 def extract_text_from_txt(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
-    except: return ""
+    except:
+        return ""
 
 def extract_text_from_file(file_path, file_format):
-    if file_format == "pdf": return extract_text_from_pdf(file_path)
-    elif file_format in ["docx", "doc"]: return extract_text_from_docx(file_path)
-    elif file_format == "txt": return extract_text_from_txt(file_path)
+    if file_format == "pdf":
+        return extract_text_from_pdf(file_path)
+    elif file_format in ["docx", "doc"]:
+        return extract_text_from_docx(file_path)
+    elif file_format == "txt":
+        return extract_text_from_txt(file_path)
+    # 其他格式（Excel/图片）不在这里抽文本
     return ""
 
 def generate_embedding(text):
@@ -216,13 +223,18 @@ def extract_files_from_zip(zip_file):
             zip_ref.extractall(temp_dir)
         for root, dirs, files in os.walk(temp_dir):
             for filename in files:
-                if filename.startswith('.'): continue
+                if filename.startswith('.'):
+                    continue
                 ext = filename.split('.')[-1].lower() if '.' in filename else ''
                 if ext in ['pdf', 'docx', 'doc', 'txt', 'xlsx', 'xls', 'png', 'jpg', 'jpeg']:
                     file_path = os.path.join(root, filename)
                     with open(file_path, 'rb') as f:
-                        extracted.append({'name': filename, 'content': f.read(), 
-                                        'size': os.path.getsize(file_path), 'type': ext})
+                        extracted.append({
+                            'name': filename,
+                            'content': f.read(), 
+                            'size': os.path.getsize(file_path),
+                            'type': ext
+                        })
     finally:
         shutil.rmtree(temp_dir)
     return extracted
@@ -233,20 +245,35 @@ AUTO_ANNOTATE_SYSTEM = """You are an underwriting document auto-tagger. Given te
 Return ONLY valid JSON."""
 
 def auto_annotate_by_llm(text, filename):
-    content = call_deepseek_api([{"role":"system","content":AUTO_ANNOTATE_SYSTEM},
-                                 {"role":"user","content":f"FILENAME: {filename}\nTEXT:\n{text[:4000]}"}],
-                                temperature=0.2, max_tokens=700)
+    content = call_deepseek_api(
+        [
+            {"role":"system","content":AUTO_ANNOTATE_SYSTEM},
+            {"role":"user","content":f"FILENAME: {filename}\nTEXT:\n{text[:4000]}"},
+        ],
+        temperature=0.2,
+        max_tokens=700
+    )
     try:
         cleaned = content.strip().strip("`")
-        if "```" in cleaned: cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
+        if "```" in cleaned:
+            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
         data = json.loads(cleaned.strip())
     except:
-        data = {"tags":{"equipment":["Other"],"industry":["Other"],"timeline":["Earlier"]},
-                "decision":"Pending","premium":0,"risk_level":"Medium","case_summary":"","key_insights":""}
+        data = {
+            "tags":{"equipment":["Other"],"industry":["Other"],"timeline":["Earlier"]},
+            "decision":"Pending","premium":0,"risk_level":"Medium",
+            "case_summary":"","key_insights":""
+        }
     data.setdefault("tags", {})
     for k in ["equipment","industry","timeline"]:
         data["tags"].setdefault(k, ["Other" if k!="timeline" else "Earlier"])
-    for k,v in [("decision","Pending"),("premium",0),("risk_level","Medium"),("case_summary",""),("key_insights","")]:
+    for k,v in [
+        ("decision","Pending"),
+        ("premium",0),
+        ("risk_level","Medium"),
+        ("case_summary",""),
+        ("key_insights","")
+    ]:
         data.setdefault(k,v)
     return data
 
@@ -259,10 +286,12 @@ class UserSettings:
         self.settings = self._load()
     def _load(self):
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f: return json.load(f)
+            with open(SETTINGS_FILE, 'r') as f:
+                return json.load(f)
         return {"tutorial_completed": False, "first_visit": True, "theme": "Light"}
     def _save(self):
-        with open(SETTINGS_FILE, 'w') as f: json.dump(self.settings, f, indent=2)
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(self.settings, f, indent=2)
     def is_first_time(self):
         return self.settings.get("first_visit", True) and not self.settings.get("tutorial_completed", False)
     def complete_tutorial(self):
@@ -283,38 +312,66 @@ class KnowledgeBase:
         self.embeddings = self._load_embeddings()
     def _load_metadata(self):
         if os.path.exists(METADATA_FILE):
-            with open(METADATA_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+            with open(METADATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
         return []
     def _save_metadata(self):
         with open(METADATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.metadata, f, ensure_ascii=False, indent=2)
     def _load_embeddings(self):
         if os.path.exists(EMBEDDINGS_FILE):
-            with open(EMBEDDINGS_FILE, 'r') as f: return json.load(f)
+            with open(EMBEDDINGS_FILE, 'r') as f:
+                return json.load(f)
         return {}
     def _save_embeddings(self):
-        with open(EMBEDDINGS_FILE, 'w') as f: json.dump(self.embeddings, f, indent=2)
+        with open(EMBEDDINGS_FILE, 'w') as f:
+            json.dump(self.embeddings, f, indent=2)
     
-    def add_document_from_content(self, filename, file_content, file_size, tags, case_summary, 
-                                   key_insights, decision, premium, risk_level, extracted_text=""):
+    def add_document_from_content(
+        self,
+        filename,
+        file_content,
+        file_size,
+        tags,
+        case_summary,
+        key_insights,
+        decision,
+        premium,
+        risk_level,
+        extracted_text=""
+    ):
         doc_id = f"DOC-{datetime.now().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(filename.encode()).hexdigest()[:6].upper()}"
         ext = filename.split('.')[-1].lower()
         saved_filename = f"{doc_id}.{ext}"
         file_path = os.path.join(DOCS_DIR, saved_filename)
-        with open(file_path, "wb") as f: f.write(file_content)
+        with open(file_path, "wb") as f:
+            f.write(file_content)
         full_text = f"{case_summary} {key_insights} {extracted_text[:1000]}"
         embedding = generate_embedding(full_text)
-        doc_meta = {"doc_id": doc_id, "filename": filename, "file_format": ext, "file_path": file_path,
-                    "file_size_kb": file_size/1024, "upload_date": datetime.now().isoformat(),
-                    "tags": tags, "decision": decision, "premium": premium, "risk_level": risk_level,
-                    "case_summary": case_summary, "key_insights": key_insights, "extracted_text_preview": extracted_text[:500]}
+        doc_meta = {
+            "doc_id": doc_id,
+            "filename": filename,
+            "file_format": ext,
+            "file_path": file_path,
+            "file_size_kb": file_size/1024,
+            "upload_date": datetime.now().isoformat(),
+            "tags": tags,
+            "decision": decision,
+            "premium": premium,
+            "risk_level": risk_level,
+            "case_summary": case_summary,
+            "key_insights": key_insights,
+            "extracted_text_preview": extracted_text[:500]
+        }
         self.metadata.append(doc_meta)
         self.embeddings[doc_id] = embedding
-        self._save_metadata(); self._save_embeddings()
+        self._save_metadata()
+        self._save_embeddings()
         return doc_meta
     
     def search_documents(self, query, top_k=5):
-        if not self.metadata: return []
+        if not self.metadata:
+            return []
         qv = generate_embedding(query)
         scored = []
         for doc in self.metadata:
@@ -324,21 +381,27 @@ class KnowledgeBase:
                 ql = query.lower()
                 for tag_list in doc["tags"].values():
                     for tag in tag_list:
-                        if tag.lower() in ql: sim += 0.1
+                        if tag.lower() in ql:
+                            sim += 0.1
                 scored.append((sim, doc))
         scored.sort(reverse=True, key=lambda x: x[0])
         return [d for _, d in scored[:top_k]]
     
     def delete_document(self, doc_id):
         self.metadata = [d for d in self.metadata if d["doc_id"] != doc_id]
-        if doc_id in self.embeddings: del self.embeddings[doc_id]
+        if doc_id in self.embeddings:
+            del self.embeddings[doc_id]
         for fn in os.listdir(DOCS_DIR):
-            if fn.startswith(doc_id): os.remove(os.path.join(DOCS_DIR, fn))
-        self._save_metadata(); self._save_embeddings()
+            if fn.startswith(doc_id):
+                os.remove(os.path.join(DOCS_DIR, fn))
+        self._save_metadata()
+        self._save_embeddings()
     
     def get_stats(self):
-        return {"total_documents": len(self.metadata),
-                "total_size_mb": sum(d["file_size_kb"] for d in self.metadata)/1024 if self.metadata else 0.0}
+        return {
+            "total_documents": len(self.metadata),
+            "total_size_mb": sum(d["file_size_kb"] for d in self.metadata)/1024 if self.metadata else 0.0
+        }
 
 # ============================================================================
 # CONVERSATION MANAGER
@@ -349,28 +412,43 @@ class ConversationManager:
         self.conversations = self._load()
     def _load(self):
         if os.path.exists(CONV_FILE):
-            with open(CONV_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+            with open(CONV_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
         return {}
     def _save(self):
         with open(CONV_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.conversations, f, ensure_ascii=False, indent=2)
+
     def create_conversation(self, title=None):
         conv_id = f"CONV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        self.conversations[conv_id] = {"id": conv_id, "title": title or "New Chat",
-                                       "created_at": datetime.now().isoformat(),
-                                       "updated_at": datetime.now().isoformat(), "messages": []}
+        self.conversations[conv_id] = {
+            "id": conv_id,
+            "title": title or "New Chat",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "messages": []
+        }
         self._save()
         return conv_id
-    def add_message(self, conv_id, role, content):
+
+    def add_message(self, conv_id, role, content, **extra):
+        """支持额外元数据，例如 retrieved_docs / mode 等"""
         if conv_id in self.conversations:
-            self.conversations[conv_id]["messages"].append({"role": role, "content": content,
-                                                            "timestamp": datetime.now().isoformat()})
+            msg = {
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now().isoformat()
+            }
+            msg.update(extra)
+            self.conversations[conv_id]["messages"].append(msg)
             self.conversations[conv_id]["updated_at"] = datetime.now().isoformat()
             if role == "user" and len(self.conversations[conv_id]["messages"]) == 1:
                 self.conversations[conv_id]["title"] = content[:35] + ("..." if len(content) > 35 else "")
             self._save()
+
     def delete_conversation(self, conv_id):
-        if conv_id in self.conversations: del self.conversations[conv_id]
+        if conv_id in self.conversations:
+            del self.conversations[conv_id]
         self._save()
     def get_conversation(self, conv_id):
         return self.conversations.get(conv_id, None)
@@ -443,7 +521,9 @@ def generate_quick_response(query, retrieved_docs):
     for doc in retrieved_docs:
         equipment = ", ".join(doc["tags"].get("equipment", []))
         industry = ", ".join(doc["tags"].get("industry", []))
-        docs_summary.append(f"- {doc['filename']}: {doc['decision']}, ${doc['premium']:,}, {equipment}, {industry}")
+        docs_summary.append(
+            f"- {doc['filename']}: {doc['decision']}, ${doc['premium']:,}, {equipment}, {industry}"
+        )
     
     docs_text = "\n".join(docs_summary)
     
@@ -493,7 +573,12 @@ def inject_css(theme):
 # ============================================================================
 
 def main():
-    st.set_page_config(page_title="Underwriting Assistant", page_icon="🤖", layout="wide", initial_sidebar_state="collapsed")
+    st.set_page_config(
+        page_title="Underwriting Assistant",
+        page_icon="🤖",
+        layout="wide",
+        initial_sidebar_state="collapsed"
+    )
     
     kb = KnowledgeBase()
     conv_mgr = ConversationManager()
@@ -501,7 +586,9 @@ def main():
     
     if "current_conv_id" not in st.session_state:
         all_convs = conv_mgr.get_all_conversations()
-        st.session_state.current_conv_id = all_convs[0]["id"] if all_convs else conv_mgr.create_conversation()
+        st.session_state.current_conv_id = (
+            all_convs[0]["id"] if all_convs else conv_mgr.create_conversation()
+        )
     if "current_page" not in st.session_state:
         st.session_state.current_page = "chat"
     if "theme" not in st.session_state:
@@ -510,6 +597,9 @@ def main():
         st.session_state.tutorial_active = user_settings.is_first_time()
     if "tutorial_step" not in st.session_state:
         st.session_state.tutorial_step = 1 if st.session_state.tutorial_active else 0
+    # 新增：KB 聚焦的 doc_id（用于从 Chat 跳转时自动展开）
+    if "kb_focus_doc_id" not in st.session_state:
+        st.session_state.kb_focus_doc_id = None
     
     inject_css(st.session_state.theme)
     
@@ -543,7 +633,7 @@ def render_tutorial(user_settings):
         # Title
         st.markdown(f"## {step_data['title']}")
         
-        # Content (using Streamlit's native markdown)
+        # Content
         st.markdown(step_data['content'])
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -594,16 +684,25 @@ def render_app(kb, conv_mgr, user_settings):
             st.session_state.current_conv_id = new_id
             st.session_state.current_page = "chat"
             st.rerun()
-        if st.button("💬 Chats", use_container_width=True, 
-                    type="primary" if st.session_state.current_page == "chat" else "secondary"):
+        if st.button(
+            "💬 Chats",
+            use_container_width=True, 
+            type="primary" if st.session_state.current_page == "chat" else "secondary"
+        ):
             st.session_state.current_page = "chat"
             st.rerun()
-        if st.button("📄 Knowledge Base", use_container_width=True,
-                    type="primary" if st.session_state.current_page == "kb" else "secondary"):
+        if st.button(
+            "📄 Knowledge Base",
+            use_container_width=True,
+            type="primary" if st.session_state.current_page == "kb" else "secondary"
+        ):
             st.session_state.current_page = "kb"
             st.rerun()
-        if st.button("📤 Upload", use_container_width=True,
-                    type="primary" if st.session_state.current_page == "upload" else "secondary"):
+        if st.button(
+            "📤 Upload",
+            use_container_width=True,
+            type="primary" if st.session_state.current_page == "upload" else "secondary"
+        ):
             st.session_state.current_page = "upload"
             st.rerun()
         st.markdown("---")
@@ -611,18 +710,24 @@ def render_app(kb, conv_mgr, user_settings):
         for conv in all_convs[:15]:
             conv_id = conv["id"]
             is_active = (conv_id == st.session_state.current_conv_id)
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                if st.button(f"{'📌' if is_active else '💬'} {conv['title'][:28]}", key=f"nav_conv_{conv_id}",
-                           use_container_width=True, type="primary" if is_active else "secondary"):
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                if st.button(
+                    f"{'📌' if is_active else '💬'} {conv['title'][:28]}",
+                    key=f"nav_conv_{conv_id}",
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary"
+                ):
                     st.session_state.current_conv_id = conv_id
                     st.session_state.current_page = "chat"
                     st.rerun()
-            with col2:
+            with c2:
                 if st.button("🗑️", key=f"nav_del_{conv_id}", use_container_width=True):
                     conv_mgr.delete_conversation(conv_id)
                     remaining = conv_mgr.get_all_conversations()
-                    st.session_state.current_conv_id = remaining[0]["id"] if remaining else conv_mgr.create_conversation()
+                    st.session_state.current_conv_id = (
+                        remaining[0]["id"] if remaining else conv_mgr.create_conversation()
+                    )
                     st.rerun()
         st.markdown("---")
         stats = kb.get_stats()
@@ -648,7 +753,6 @@ def render_chat_page(kb, conv_mgr):
     with col1:
         st.title(f"💬 {current_conv['title']}")
     with col2:
-        # Initialize response mode if not exists
         if "response_mode" not in st.session_state:
             st.session_state.response_mode = "CoT"
         
@@ -665,8 +769,7 @@ def render_chat_page(kb, conv_mgr):
     for msg in current_conv["messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            
-            # If message has retrieved docs metadata, show clickable references
+            # 如果这条 assistant 消息里带有引用文档，渲染可点击参考区
             if msg["role"] == "assistant" and "retrieved_docs" in msg:
                 render_clickable_references(msg["retrieved_docs"], kb)
     
@@ -682,10 +785,12 @@ def render_chat_page(kb, conv_mgr):
         
         # Generate AI response
         with st.chat_message("assistant"):
-            with st.spinner(f"{'🧠 Analyzing with CoT...' if st.session_state.response_mode == 'CoT' else '⚡ Generating quick response...'}"):
+            with st.spinner(
+                "🧠 Analyzing with CoT..." if st.session_state.response_mode == "CoT"
+                else "⚡ Generating quick response..."
+            ):
                 retrieved = kb.search_documents(prompt, top_k=5)
                 
-                # Choose response mode
                 if st.session_state.response_mode == "CoT":
                     resp = generate_cot_response(prompt, retrieved)
                     mode_label = "🧠 Chain-of-Thought Analysis"
@@ -693,41 +798,33 @@ def render_chat_page(kb, conv_mgr):
                     resp = generate_quick_response(prompt, retrieved)
                     mode_label = "⚡ Quick Response"
                 
-                # Display response with mode indicator
                 st.caption(mode_label)
                 st.markdown(resp)
                 
-                # Show clickable references
                 if retrieved:
                     render_clickable_references(retrieved, kb)
         
-        # Save message with metadata
-        message_with_meta = {
-            "role": "assistant",
-            "content": resp,
-            "retrieved_docs": [doc["doc_id"] for doc in retrieved],
-            "mode": st.session_state.response_mode
-        }
-        conv_mgr.add_message(st.session_state.current_conv_id, "assistant", resp)
-        
-        # Store metadata separately (for clickable links)
-        if "message_metadata" not in st.session_state:
-            st.session_state.message_metadata = {}
-        st.session_state.message_metadata[len(current_conv["messages"])] = {
-            "retrieved_docs": retrieved
-        }
+        # 保存 assistant 消息，并把引用到的文档 ID 一起写入会话
+        conv_mgr.add_message(
+            st.session_state.current_conv_id,
+            "assistant",
+            resp,
+            retrieved_docs=[doc["doc_id"] for doc in retrieved],
+            mode=st.session_state.response_mode,
+        )
         
         st.rerun()
 
 def render_clickable_references(doc_ids_or_docs, kb):
-    """Render clickable document references that jump to KB page"""
-    
-    # Handle both doc IDs and full doc objects
-    if doc_ids_or_docs and isinstance(doc_ids_or_docs[0], str):
-        # It's a list of doc IDs, need to fetch full docs
+    """在聊天里渲染可点击的文档引用区，并支持跳转到知识库页"""
+
+    if not doc_ids_or_docs:
+        return
+
+    # 支持 doc_id 列表 或 doc 对象列表
+    if isinstance(doc_ids_or_docs[0], str):
         docs = [doc for doc in kb.metadata if doc["doc_id"] in doc_ids_or_docs]
     else:
-        # It's already full doc objects
         docs = doc_ids_or_docs
     
     if not docs:
@@ -736,21 +833,25 @@ def render_clickable_references(doc_ids_or_docs, kb):
     st.markdown("---")
     st.markdown(f"**📚 Referenced Documents ({len(docs)}):**")
     
-    # Create clickable document cards
     for i, doc in enumerate(docs, 1):
         with st.expander(f"{i}. {SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}", expanded=False):
-            # Document info
-            col1, col2, col3 = st.columns(3)
-            with col1:
+            # 基本信息
+            c1, c2, c3 = st.columns(3)
+            with c1:
                 st.markdown(f"**ID:** `{doc['doc_id']}`")
-            with col2:
+            with c2:
                 decision = doc.get("decision", "N/A")
-                emoji = {"Approved": "🟢", "Declined": "🔴", "Conditional": "🟡", "Pending": "⚪"}.get(decision, "⚪")
+                emoji = {
+                    "Approved": "🟢",
+                    "Declined": "🔴",
+                    "Conditional": "🟡",
+                    "Pending": "⚪"
+                }.get(decision, "⚪")
                 st.markdown(f"**Decision:** {emoji} {decision}")
-            with col3:
+            with c3:
                 st.markdown(f"**Premium:** ${doc.get('premium', 0):,}")
             
-            # Tags
+            # 标签
             tags_html = ""
             for t in doc["tags"].get("equipment", []): 
                 tags_html += f'<span class="tag-equipment">🔧 {t}</span>'
@@ -761,15 +862,22 @@ def render_clickable_references(doc_ids_or_docs, kb):
             if tags_html:
                 st.markdown(tags_html, unsafe_allow_html=True)
             
-            # Summary
+            # 摘要
             if doc.get("case_summary"):
-                st.info(doc["case_summary"][:200] + "..." if len(doc.get("case_summary", "")) > 200 else doc["case_summary"])
+                summary = doc["case_summary"]
+                if len(summary) > 200:
+                    summary = summary[:200] + "..."
+                st.info(summary)
             
-            # Jump to KB button
-            if st.button(f"🔗 View in Knowledge Base", key=f"jump_kb_{doc['doc_id']}_{i}", use_container_width=True):
-                # Set filter to show this specific document
+            # 跳转到 KB，并指定要展开的 doc_id
+            if st.button(
+                "🔗 View in Knowledge Base",
+                key=f"jump_kb_{doc['doc_id']}_{i}",
+                use_container_width=True
+            ):
                 st.session_state.current_page = "kb"
                 st.session_state.kb_search_query = doc["filename"]
+                st.session_state.kb_focus_doc_id = doc["doc_id"]   # ★ 关键：告诉 KB 要展开哪个文档
                 st.rerun()
 
 def render_kb_page(kb):
@@ -779,59 +887,53 @@ def render_kb_page(kb):
         st.info("📭 No documents yet. Go to Upload tab to add your first case!")
         return
     
-    # ============================================================================
-    # SEARCH & FILTER SECTION
-    # ============================================================================
-    
+    # ===================== 搜索 & 排序 =====================
     st.markdown("### 🔍 Search & Filter")
     
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        # Check if jumping from chat with search query
+    c1, c2 = st.columns([2, 1])
+    with c1:
         default_search = st.session_state.get("kb_search_query", "")
         if default_search:
-            # Clear the session state after using it
+            # 用完就清掉，以免后面一直被覆盖
             st.session_state.kb_search_query = ""
-        
         search_query = st.text_input(
             "🔎 Search by filename or content",
             value=default_search,
             placeholder="e.g., 'ABC Oil', 'turbine', 'boiler'...",
             help="Search across filenames, summaries, and key insights"
         )
-    
-    with col2:
+    with c2:
         sort_by = st.selectbox(
             "📊 Sort by",
-            ["Upload Date (Newest)", "Upload Date (Oldest)", "Premium (High to Low)", "Premium (Low to High)", "Filename (A-Z)"],
+            [
+                "Upload Date (Newest)",
+                "Upload Date (Oldest)",
+                "Premium (High to Low)",
+                "Premium (Low to High)",
+                "Filename (A-Z)"
+            ],
             help="Choose how to sort the results"
         )
     
-    # Filter tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🔧 Equipment", "🏭 Industry", "📅 Timeline", "⚖️ Decision"])
-    
     with tab1:
         equipment_filter = st.multiselect(
             "Filter by Equipment",
             options=TAG_OPTIONS["equipment"],
             help="Select one or more equipment types"
         )
-    
     with tab2:
         industry_filter = st.multiselect(
             "Filter by Industry",
             options=TAG_OPTIONS["industry"],
             help="Select one or more industries"
         )
-    
     with tab3:
         timeline_filter = st.multiselect(
             "Filter by Timeline",
             options=TAG_OPTIONS["timeline"],
             help="Select one or more time periods"
         )
-    
     with tab4:
         decision_filter = st.multiselect(
             "Filter by Decision",
@@ -841,54 +943,39 @@ def render_kb_page(kb):
     
     st.markdown("---")
     
-    # ============================================================================
-    # APPLY FILTERS
-    # ============================================================================
-    
+    # ===================== 过滤逻辑 =====================
     filtered_docs = kb.metadata.copy()
     
-    # Text search
     if search_query:
-        search_lower = search_query.lower()
+        s = search_query.lower()
         filtered_docs = [
-            doc for doc in filtered_docs
-            if search_lower in doc["filename"].lower()
-            or search_lower in doc.get("case_summary", "").lower()
-            or search_lower in doc.get("key_insights", "").lower()
+            d for d in filtered_docs
+            if s in d["filename"].lower()
+            or s in d.get("case_summary", "").lower()
+            or s in d.get("key_insights", "").lower()
         ]
-    
-    # Equipment filter
     if equipment_filter:
         filtered_docs = [
-            doc for doc in filtered_docs
-            if any(eq in doc["tags"].get("equipment", []) for eq in equipment_filter)
+            d for d in filtered_docs
+            if any(eq in d["tags"].get("equipment", []) for eq in equipment_filter)
         ]
-    
-    # Industry filter
     if industry_filter:
         filtered_docs = [
-            doc for doc in filtered_docs
-            if any(ind in doc["tags"].get("industry", []) for ind in industry_filter)
+            d for d in filtered_docs
+            if any(ind in d["tags"].get("industry", []) for ind in industry_filter)
         ]
-    
-    # Timeline filter
     if timeline_filter:
         filtered_docs = [
-            doc for doc in filtered_docs
-            if any(time in doc["tags"].get("timeline", []) for time in timeline_filter)
+            d for d in filtered_docs
+            if any(t in d["tags"].get("timeline", []) for t in timeline_filter)
         ]
-    
-    # Decision filter
     if decision_filter:
         filtered_docs = [
-            doc for doc in filtered_docs
-            if doc.get("decision", "") in decision_filter
+            d for d in filtered_docs
+            if d.get("decision", "") in decision_filter
         ]
     
-    # ============================================================================
-    # SORTING
-    # ============================================================================
-    
+    # ===================== 排序 =====================
     if sort_by == "Upload Date (Newest)":
         filtered_docs.sort(key=lambda x: x.get("upload_date", ""), reverse=True)
     elif sort_by == "Upload Date (Oldest)":
@@ -900,30 +987,32 @@ def render_kb_page(kb):
     elif sort_by == "Filename (A-Z)":
         filtered_docs.sort(key=lambda x: x.get("filename", "").lower())
     
-    # ============================================================================
-    # RESULTS HEADER
-    # ============================================================================
-    
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
+    # ===================== 结果头部 =====================
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
         st.markdown(f"### 📊 Results: {len(filtered_docs)} / {len(kb.metadata)} documents")
-    with col2:
+    with c2:
         if st.button("🔄 Reset Filters", use_container_width=True):
+            # 重置时，也清掉 focus
+            st.session_state.kb_focus_doc_id = None
             st.rerun()
-    with col3:
+    with c3:
         if filtered_docs and st.button("📥 Export CSV", use_container_width=True):
             import pandas as pd
-            df = pd.DataFrame([{
-                "Document ID": d["doc_id"],
-                "Filename": d["filename"],
-                "Equipment": ", ".join(d["tags"].get("equipment", [])),
-                "Industry": ", ".join(d["tags"].get("industry", [])),
-                "Timeline": ", ".join(d["tags"].get("timeline", [])),
-                "Decision": d.get("decision", ""),
-                "Premium": d.get("premium", 0),
-                "Risk Level": d.get("risk_level", ""),
-                "Upload Date": d.get("upload_date", "")
-            } for d in filtered_docs])
+            df = pd.DataFrame([
+                {
+                    "Document ID": d["doc_id"],
+                    "Filename": d["filename"],
+                    "Equipment": ", ".join(d["tags"].get("equipment", [])),
+                    "Industry": ", ".join(d["tags"].get("industry", [])),
+                    "Timeline": ", ".join(d["tags"].get("timeline", [])),
+                    "Decision": d.get("decision", ""),
+                    "Premium": d.get("premium", 0),
+                    "Risk Level": d.get("risk_level", ""),
+                    "Upload Date": d.get("upload_date", "")
+                }
+                for d in filtered_docs
+            ])
             csv = df.to_csv(index=False)
             st.download_button(
                 "⬇️ Download CSV",
@@ -935,28 +1024,29 @@ def render_kb_page(kb):
     
     st.markdown("---")
     
-    # ============================================================================
-    # DISPLAY DOCUMENTS
-    # ============================================================================
-    
     if not filtered_docs:
         st.warning("🔍 No documents match your filters. Try adjusting your search criteria.")
         return
     
+    # ★ 当前需要被自动展开的 doc_id（从 Chat 点过来的）
+    focus_id = st.session_state.get("kb_focus_doc_id")
+
     for doc in filtered_docs:
-        with st.expander(f"{SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}", expanded=False):
-            # Document header
-            col1, col2 = st.columns([3, 1])
-            with col1:
+        expanded = (doc["doc_id"] == focus_id)  # 只有被点过的那一个默认展开，其余默认折叠
+        with st.expander(
+            f"{SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}",
+            expanded=expanded
+        ):
+            c1, c2 = st.columns([3, 1])
+            with c1:
                 st.markdown(f"**Document ID:** `{doc['doc_id']}`")
                 st.markdown(f"**Upload Date:** {doc.get('upload_date', 'N/A')[:10]}")
-            with col2:
+            with c2:
                 st.markdown(f"**Size:** {doc.get('file_size_kb', 0):.1f} KB")
                 st.markdown(f"**Format:** {doc['file_format'].upper()}")
             
             st.markdown("---")
             
-            # Tags
             tags_html = ""
             for t in doc["tags"].get("equipment", []): 
                 tags_html += f'<span class="tag-equipment">🔧 {t}</span>'
@@ -968,55 +1058,51 @@ def render_kb_page(kb):
                 st.markdown(tags_html, unsafe_allow_html=True)
                 st.markdown("---")
             
-            # Decision & Premium
-            col1, col2, col3 = st.columns(3)
-            with col1:
+            c1, c2, c3 = st.columns(3)
+            with c1:
                 decision = doc.get("decision", "N/A")
-                decision_color = {
+                decision_emoji = {
                     "Approved": "🟢",
                     "Declined": "🔴",
                     "Conditional": "🟡",
                     "Pending": "⚪"
                 }.get(decision, "⚪")
-                st.markdown(f"**Decision:** {decision_color} {decision}")
-            with col2:
+                st.markdown(f"**Decision:** {decision_emoji} {decision}")
+            with c2:
                 premium = doc.get("premium", 0)
                 st.markdown(f"**Premium:** ${premium:,}")
-            with col3:
+            with c3:
                 risk = doc.get("risk_level", "N/A")
                 risk_emoji = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(risk, "⚪")
                 st.markdown(f"**Risk:** {risk_emoji} {risk}")
             
             st.markdown("---")
             
-            # Case summary
             if doc.get("case_summary"):
                 st.markdown("**📝 Case Summary:**")
                 st.info(doc["case_summary"])
-            
-            # Key insights
             if doc.get("key_insights"):
                 st.markdown("**💡 Key Insights:**")
                 st.success(doc["key_insights"])
-            
-            # Preview
             if doc.get("extracted_text_preview"):
                 with st.expander("👁️ Text Preview"):
                     st.text(doc["extracted_text_preview"])
             
             st.markdown("---")
             
-            # Actions
-            col1, col2, col3 = st.columns(3)
-            with col1:
+            c1, c2, c3 = st.columns(3)
+            with c1:
                 if st.button("🗑️ Delete", key=f"del_{doc['doc_id']}", use_container_width=True):
                     kb.delete_document(doc["doc_id"])
+                    # 删除后也清掉 focus
+                    if st.session_state.get("kb_focus_doc_id") == doc["doc_id"]:
+                        st.session_state.kb_focus_doc_id = None
                     st.success("Deleted!")
                     st.rerun()
-            with col2:
+            with c2:
                 if st.button("📋 Copy ID", key=f"copy_{doc['doc_id']}", use_container_width=True):
                     st.code(doc['doc_id'])
-            with col3:
+            with c3:
                 if os.path.exists(doc.get("file_path", "")):
                     with open(doc["file_path"], "rb") as f:
                         st.download_button(
@@ -1027,6 +1113,9 @@ def render_kb_page(kb):
                             use_container_width=True
                         )
 
+    # 用完 focus 一次之后就清掉，这样下一次打开 KB 就恢复正常折叠状态
+    if focus_id:
+        st.session_state.kb_focus_doc_id = None
 
 def render_upload_page(kb):
     st.title("📤 Batch Upload Documents")
@@ -1034,14 +1123,20 @@ def render_upload_page(kb):
     st.markdown("---")
     
     if upload_mode == "📄 Multiple Files":
-        uploaded_files = st.file_uploader("Choose documents", 
+        uploaded_files = st.file_uploader(
+            "Choose documents", 
             type=['pdf', 'docx', 'doc', 'txt', 'xlsx', 'xls', 'png', 'jpg', 'jpeg'],
-            accept_multiple_files=True, help="Hold Ctrl/Cmd to select multiple files")
+            accept_multiple_files=True,
+            help="Hold Ctrl/Cmd to select multiple files"
+        )
         if uploaded_files:
             st.success(f"✅ {len(uploaded_files)} files selected")
             with st.expander(f"📋 File List ({len(uploaded_files)} files)"):
                 for i, f in enumerate(uploaded_files, 1):
-                    st.write(f"{i}. {SUPPORTED_FORMATS.get(f.name.split('.')[-1].lower(), '📎')} {f.name} ({f.size/1024:.1f} KB)")
+                    st.write(
+                        f"{i}. {SUPPORTED_FORMATS.get(f.name.split('.')[-1].lower(), '📎')} "
+                        f"{f.name} ({f.size/1024:.1f} KB)"
+                    )
             if st.button("🚀 Process All Files", type="primary", use_container_width=True):
                 process_batch(kb, uploaded_files)
     else:
@@ -1055,7 +1150,10 @@ def render_upload_page(kb):
                     st.success(f"✅ Extracted {len(extracted)} files")
                     with st.expander(f"📋 Files ({len(extracted)})"):
                         for i, f in enumerate(extracted, 1):
-                            st.write(f"{i}. {SUPPORTED_FORMATS.get(f['type'], '📎')} {f['name']} ({f['size']/1024:.1f} KB)")
+                            st.write(
+                                f"{i}. {SUPPORTED_FORMATS.get(f['type'], '📎')} "
+                                f"{f['name']} ({f['size']/1024:.1f} KB)"
+                            )
                     process_batch_content(kb, extracted)
                 else:
                     st.warning("No supported files in ZIP")
@@ -1073,27 +1171,45 @@ def process_batch(kb, files):
         try:
             ext = f.name.split('.')[-1].lower()
             temp_path = os.path.join(DOCS_DIR, f"TEMP_{i}.{ext}")
-            with open(temp_path, "wb") as tf: tf.write(f.getbuffer())
+            with open(temp_path, "wb") as tf:
+                tf.write(f.getbuffer())
             text = extract_text_from_file(temp_path, ext)
             auto = auto_annotate_by_llm(text, f.name)
-            doc = kb.add_document_from_content(f.name, f.getbuffer(), f.size, auto["tags"],
-                auto["case_summary"], auto["key_insights"], auto["decision"], int(auto.get("premium", 0) or 0),
-                auto["risk_level"], text[:800])
-            try: os.remove(temp_path)
-            except: pass
-            with status: st.success(f"✅ {f.name} → {doc['doc_id']}")
+            doc = kb.add_document_from_content(
+                f.name,
+                f.getbuffer(),
+                f.size,
+                auto["tags"],
+                auto["case_summary"],
+                auto["key_insights"],
+                auto["decision"],
+                int(auto.get("premium", 0) or 0),
+                auto["risk_level"],
+                text[:800]
+            )
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+            with status:
+                st.success(f"✅ {f.name} → {doc['doc_id']}")
             success += 1
         except Exception as e:
-            with status: st.error(f"❌ {f.name}: {str(e)}")
+            with status:
+                st.error(f"❌ {f.name}: {str(e)}")
             errors += 1
     progress.progress(1.0)
     st.markdown("---")
     st.markdown("### 📊 Upload Summary")
     c1, c2, c3 = st.columns(3)
-    with c1: st.metric("✅ Success", success)
-    with c2: st.metric("❌ Errors", errors)
-    with c3: st.metric("📊 Total", len(files))
-    if success > 0: st.balloons()
+    with c1:
+        st.metric("✅ Success", success)
+    with c2:
+        st.metric("❌ Errors", errors)
+    with c3:
+        st.metric("📊 Total", len(files))
+    if success > 0:
+        st.balloons()
 
 def process_batch_content(kb, files):
     st.markdown("---")
@@ -1108,27 +1224,45 @@ def process_batch_content(kb, files):
         try:
             ext = f['type']
             temp_path = os.path.join(DOCS_DIR, f"TEMP_{i}.{ext}")
-            with open(temp_path, "wb") as tf: tf.write(f['content'])
+            with open(temp_path, "wb") as tf:
+                tf.write(f['content'])
             text = extract_text_from_file(temp_path, ext)
             auto = auto_annotate_by_llm(text, f['name'])
-            doc = kb.add_document_from_content(f['name'], f['content'], f['size'], auto["tags"],
-                auto["case_summary"], auto["key_insights"], auto["decision"], int(auto.get("premium", 0) or 0),
-                auto["risk_level"], text[:800])
-            try: os.remove(temp_path)
-            except: pass
-            with status: st.success(f"✅ {f['name']} → {doc['doc_id']}")
+            doc = kb.add_document_from_content(
+                f['name'],
+                f['content'],
+                f['size'],
+                auto["tags"],
+                auto["case_summary"],
+                auto["key_insights"],
+                auto["decision"],
+                int(auto.get("premium", 0) or 0),
+                auto["risk_level"],
+                text[:800]
+            )
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+            with status:
+                st.success(f"✅ {f['name']} → {doc['doc_id']}")
             success += 1
         except Exception as e:
-            with status: st.error(f"❌ {f['name']}: {str(e)}")
+            with status:
+                st.error(f"❌ {f['name']}: {str(e)}")
             errors += 1
     progress.progress(1.0)
     st.markdown("---")
     st.markdown("### 📊 Upload Summary")
     c1, c2, c3 = st.columns(3)
-    with c1: st.metric("✅ Success", success)
-    with c2: st.metric("❌ Errors", errors)
-    with c3: st.metric("📊 Total", len(files))
-    if success > 0: st.balloons()
+    with c1:
+        st.metric("✅ Success", success)
+    with c2:
+        st.metric("❌ Errors", errors)
+    with c3:
+        st.metric("📊 Total", len(files))
+    if success > 0:
+        st.balloons()
 
 if __name__ == "__main__":
     main()
