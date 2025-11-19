@@ -594,7 +594,7 @@ def main():
                 st.session_state.current_session_id = new_sess["id"]
                 st.session_state.messages = []
                 st.session_state.loaded_for = new_sess["id"]
-                st.experimental_rerun()
+                st.rerun()
 
             # 会话列表（radio）
             label_to_id = {s["title"]: s["id"] for s in sessions_sorted}
@@ -618,7 +618,7 @@ def main():
                 st.session_state.current_session_id = selected_id
                 st.session_state.messages = _load_session_messages(selected_id)
                 st.session_state.loaded_for = selected_id
-                st.experimental_rerun()
+                st.rerun()
 
         # -------- 右侧：聊天内容 --------
         with right_col:
@@ -719,7 +719,7 @@ def main():
                 if selected_doc and st.button("🗑️ Delete Selected"):
                     workspace.delete_document(selected_doc["doc_id"])
                     st.success("Document deleted!")
-                    st.experimental_rerun()
+                    st.rerun()
 
             with right:
                 st.markdown("#### 👀 Preview Original")
