@@ -610,21 +610,252 @@ def render_chat_page(kb, conv_mgr):
 
 def render_kb_page(kb):
     st.title("📄 Knowledge Base")
-    if not kb.metadata: st.info("No documents. Upload in Upload tab."); return
-    for doc in kb.metadata[:20]:
-        with st.expander(f"{SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}"):
-            st.markdown(f"**ID:** `{doc['doc_id']}`")
-            st.markdown(f"**Decision:** {doc['decision']} | **Premium:** ${doc['premium']:,} | **Risk:** {doc['risk_level']}")
+    
+    if not kb.metadata:
+        st.info("📭 No documents yet. Go to Upload tab to add your first case!")
+        return
+    
+    # ============================================================================
+    # SEARCH & FILTER SECTION
+    # ============================================================================
+    
+    st.markdown("### 🔍 Search & Filter")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        search_query = st.text_input(
+            "🔎 Search by filename or content",
+            placeholder="e.g., 'ABC Oil', 'turbine', 'boiler'...",
+            help="Search across filenames, summaries, and key insights"
+        )
+    
+    with col2:
+        sort_by = st.selectbox(
+            "📊 Sort by",
+            ["Upload Date (Newest)", "Upload Date (Oldest)", "Premium (High to Low)", "Premium (Low to High)", "Filename (A-Z)"],
+            help="Choose how to sort the results"
+        )
+    
+    # Filter tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["🔧 Equipment", "🏭 Industry", "📅 Timeline", "⚖️ Decision"])
+    
+    with tab1:
+        equipment_filter = st.multiselect(
+            "Filter by Equipment",
+            options=TAG_OPTIONS["equipment"],
+            help="Select one or more equipment types"
+        )
+    
+    with tab2:
+        industry_filter = st.multiselect(
+            "Filter by Industry",
+            options=TAG_OPTIONS["industry"],
+            help="Select one or more industries"
+        )
+    
+    with tab3:
+        timeline_filter = st.multiselect(
+            "Filter by Timeline",
+            options=TAG_OPTIONS["timeline"],
+            help="Select one or more time periods"
+        )
+    
+    with tab4:
+        decision_filter = st.multiselect(
+            "Filter by Decision",
+            options=["Approved", "Declined", "Conditional", "Pending"],
+            help="Filter by underwriting decision"
+        )
+    
+    st.markdown("---")
+    
+    # ============================================================================
+    # APPLY FILTERS
+    # ============================================================================
+    
+    filtered_docs = kb.metadata.copy()
+    
+    # Text search
+    if search_query:
+        search_lower = search_query.lower()
+        filtered_docs = [
+            doc for doc in filtered_docs
+            if search_lower in doc["filename"].lower()
+            or search_lower in doc.get("case_summary", "").lower()
+            or search_lower in doc.get("key_insights", "").lower()
+        ]
+    
+    # Equipment filter
+    if equipment_filter:
+        filtered_docs = [
+            doc for doc in filtered_docs
+            if any(eq in doc["tags"].get("equipment", []) for eq in equipment_filter)
+        ]
+    
+    # Industry filter
+    if industry_filter:
+        filtered_docs = [
+            doc for doc in filtered_docs
+            if any(ind in doc["tags"].get("industry", []) for ind in industry_filter)
+        ]
+    
+    # Timeline filter
+    if timeline_filter:
+        filtered_docs = [
+            doc for doc in filtered_docs
+            if any(time in doc["tags"].get("timeline", []) for time in timeline_filter)
+        ]
+    
+    # Decision filter
+    if decision_filter:
+        filtered_docs = [
+            doc for doc in filtered_docs
+            if doc.get("decision", "") in decision_filter
+        ]
+    
+    # ============================================================================
+    # SORTING
+    # ============================================================================
+    
+    if sort_by == "Upload Date (Newest)":
+        filtered_docs.sort(key=lambda x: x.get("upload_date", ""), reverse=True)
+    elif sort_by == "Upload Date (Oldest)":
+        filtered_docs.sort(key=lambda x: x.get("upload_date", ""))
+    elif sort_by == "Premium (High to Low)":
+        filtered_docs.sort(key=lambda x: x.get("premium", 0), reverse=True)
+    elif sort_by == "Premium (Low to High)":
+        filtered_docs.sort(key=lambda x: x.get("premium", 0))
+    elif sort_by == "Filename (A-Z)":
+        filtered_docs.sort(key=lambda x: x.get("filename", "").lower())
+    
+    # ============================================================================
+    # RESULTS HEADER
+    # ============================================================================
+    
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.markdown(f"### 📊 Results: {len(filtered_docs)} / {len(kb.metadata)} documents")
+    with col2:
+        if st.button("🔄 Reset Filters", use_container_width=True):
+            st.rerun()
+    with col3:
+        if filtered_docs and st.button("📥 Export CSV", use_container_width=True):
+            import pandas as pd
+            df = pd.DataFrame([{
+                "Document ID": d["doc_id"],
+                "Filename": d["filename"],
+                "Equipment": ", ".join(d["tags"].get("equipment", [])),
+                "Industry": ", ".join(d["tags"].get("industry", [])),
+                "Timeline": ", ".join(d["tags"].get("timeline", [])),
+                "Decision": d.get("decision", ""),
+                "Premium": d.get("premium", 0),
+                "Risk Level": d.get("risk_level", ""),
+                "Upload Date": d.get("upload_date", "")
+            } for d in filtered_docs])
+            csv = df.to_csv(index=False)
+            st.download_button(
+                "⬇️ Download CSV",
+                csv,
+                "knowledge_base_export.csv",
+                "text/csv",
+                use_container_width=True
+            )
+    
+    st.markdown("---")
+    
+    # ============================================================================
+    # DISPLAY DOCUMENTS
+    # ============================================================================
+    
+    if not filtered_docs:
+        st.warning("🔍 No documents match your filters. Try adjusting your search criteria.")
+        return
+    
+    for doc in filtered_docs:
+        with st.expander(f"{SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}", expanded=False):
+            # Document header
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f"**Document ID:** `{doc['doc_id']}`")
+                st.markdown(f"**Upload Date:** {doc.get('upload_date', 'N/A')[:10]}")
+            with col2:
+                st.markdown(f"**Size:** {doc.get('file_size_kb', 0):.1f} KB")
+                st.markdown(f"**Format:** {doc['file_format'].upper()}")
+            
+            st.markdown("---")
+            
+            # Tags
             tags_html = ""
-            for t in doc["tags"].get("equipment", []): tags_html += f'<span class="tag-equipment">🔧 {t}</span>'
-            for t in doc["tags"].get("industry", []): tags_html += f'<span class="tag-industry">🏭 {t}</span>'
-            for t in doc["tags"].get("timeline", []): tags_html += f'<span class="tag-timeline">📅 {t}</span>'
-            st.markdown(tags_html, unsafe_allow_html=True)
-            st.info(doc["case_summary"])
-            if st.button("🗑️ Delete", key=f"del_{doc['doc_id']}"):
-                kb.delete_document(doc["doc_id"])
-                st.success("Deleted!")
-                st.rerun()
+            for t in doc["tags"].get("equipment", []): 
+                tags_html += f'<span class="tag-equipment">🔧 {t}</span>'
+            for t in doc["tags"].get("industry", []): 
+                tags_html += f'<span class="tag-industry">🏭 {t}</span>'
+            for t in doc["tags"].get("timeline", []): 
+                tags_html += f'<span class="tag-timeline">📅 {t}</span>'
+            if tags_html:
+                st.markdown(tags_html, unsafe_allow_html=True)
+                st.markdown("---")
+            
+            # Decision & Premium
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                decision = doc.get("decision", "N/A")
+                decision_color = {
+                    "Approved": "🟢",
+                    "Declined": "🔴",
+                    "Conditional": "🟡",
+                    "Pending": "⚪"
+                }.get(decision, "⚪")
+                st.markdown(f"**Decision:** {decision_color} {decision}")
+            with col2:
+                premium = doc.get("premium", 0)
+                st.markdown(f"**Premium:** ${premium:,}")
+            with col3:
+                risk = doc.get("risk_level", "N/A")
+                risk_emoji = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(risk, "⚪")
+                st.markdown(f"**Risk:** {risk_emoji} {risk}")
+            
+            st.markdown("---")
+            
+            # Case summary
+            if doc.get("case_summary"):
+                st.markdown("**📝 Case Summary:**")
+                st.info(doc["case_summary"])
+            
+            # Key insights
+            if doc.get("key_insights"):
+                st.markdown("**💡 Key Insights:**")
+                st.success(doc["key_insights"])
+            
+            # Preview
+            if doc.get("extracted_text_preview"):
+                with st.expander("👁️ Text Preview"):
+                    st.text(doc["extracted_text_preview"])
+            
+            st.markdown("---")
+            
+            # Actions
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("🗑️ Delete", key=f"del_{doc['doc_id']}", use_container_width=True):
+                    kb.delete_document(doc["doc_id"])
+                    st.success("Deleted!")
+                    st.rerun()
+            with col2:
+                if st.button("📋 Copy ID", key=f"copy_{doc['doc_id']}", use_container_width=True):
+                    st.code(doc['doc_id'])
+            with col3:
+                if os.path.exists(doc.get("file_path", "")):
+                    with open(doc["file_path"], "rb") as f:
+                        st.download_button(
+                            "📥 Download",
+                            f.read(),
+                            doc["filename"],
+                            key=f"download_{doc['doc_id']}",
+                            use_container_width=True
+                        )
+
 
 def render_upload_page(kb):
     st.title("📤 Batch Upload Documents")
