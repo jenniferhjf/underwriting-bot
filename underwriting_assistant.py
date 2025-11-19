@@ -1,11 +1,13 @@
 """
-Underwriting Assistant - Professional RAG+CoT System
-专业承保助手 - RAG+CoT系统
+Underwriting Assistant - ChatGPT-style Layout
+专业承保助手 - ChatGPT风格布局
 
 Updates (2025-11-19):
-- 去掉 Workspace 切换功能，只保留一个默认知识库（用户无感知）
-- Chat 页内使用左右两栏：左侧是会话导航条（New Chat + 历史会话），右侧是对话内容
-- 每次聊天记录本地持久化 data/chats，像 GPT 一样可以新建/切换会话
+- ✅ 左侧导航栏：Chats、New Chat、会话列表
+- ✅ 右侧对话区域：完整对话 + 输入框
+- ✅ 无Workspace，统一知识库
+- ✅ 多会话管理，自动保存
+- ✅ 外观切换、自动标签等功能保留
 """
 
 import streamlit as st
@@ -24,55 +26,38 @@ import pandas as pd
 # CONFIGURATION
 # ============================================================================
 
-# DeepSeek API Configuration（你可以换成环境变量）
 DEEPSEEK_API_KEY = "sk-99bba2ce117444e197270f17d303e74f"
 DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"
 
-# Directories
 DATA_DIR = "data"
-WORKSPACES_DIR = os.path.join(DATA_DIR, "workspaces")  # 使用一个默认 workspace
-EMBEDDINGS_DIR = os.path.join(DATA_DIR, "embeddings")
-CHATS_DIR = os.path.join(DATA_DIR, "chats")
+KNOWLEDGE_BASE_DIR = os.path.join(DATA_DIR, "knowledge_base")
+DOCUMENTS_DIR = os.path.join(KNOWLEDGE_BASE_DIR, "documents")
+METADATA_FILE = os.path.join(KNOWLEDGE_BASE_DIR, "metadata.json")
+EMBEDDINGS_FILE = os.path.join(KNOWLEDGE_BASE_DIR, "embeddings.json")
+CONVERSATIONS_DIR = os.path.join(DATA_DIR, "conversations")
 
-os.makedirs(WORKSPACES_DIR, exist_ok=True)
-os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
-os.makedirs(CHATS_DIR, exist_ok=True)
-
-CHATS_INDEX_FILE = os.path.join(CHATS_DIR, "sessions.json")
+os.makedirs(DOCUMENTS_DIR, exist_ok=True)
+os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
 
 SUPPORTED_FORMATS = {
-    "pdf": "📄 PDF",
-    "docx": "📝 Word",
-    "doc": "📝 Word",
-    "txt": "📃 Text",
-    "xlsx": "📊 Excel",
-    "xls": "📊 Excel",
-    "png": "🖼️ Image",
-    "jpg": "🖼️ Image",
-    "jpeg": "🖼️ Image"
+    "pdf": "📄", "docx": "📝", "doc": "📝", "txt": "📃",
+    "xlsx": "📊", "xls": "📊", "png": "🖼️", "jpg": "🖼️", "jpeg": "🖼️"
 }
 
 TAG_OPTIONS = {
-    "equipment": ["Gas Turbine", "Steam Turbine", "Boiler", "Generator", "Compressor",
+    "equipment": ["Gas Turbine", "Steam Turbine", "Boiler", "Generator", "Compressor", 
                   "Heat Exchanger", "Pump", "Transformer", "Motor", "Other"],
-    "industry": ["Oil & Gas", "Power Generation", "Manufacturing", "Chemical",
+    "industry": ["Oil & Gas", "Power Generation", "Manufacturing", "Chemical", 
                  "Mining", "Refining", "Marine", "Aviation", "Other"],
     "timeline": ["2025-Q4", "2025-Q3", "2025-Q2", "2025-Q1", "2024", "2023", "Earlier"]
 }
-
-DEFAULT_WORKSPACE_NAME = "default"
-
-# ============================================================================
-# SYSTEM INSTRUCTION (CoT)
-# ============================================================================
 
 SYSTEM_INSTRUCTION = """Role: You are Mr. X's AI underwriting assistant
 
 Task: Answer underwriting queries using retrieved cases
 
 Process: Think step-by-step using this framework:
-
 Step 1: Extract key tags from query
 Step 2: Analyze retrieved precedents
 Step 3: Check recency & applicability
@@ -86,25 +71,10 @@ Output: Provide decision + premium + sources"""
 # ============================================================================
 
 def call_deepseek_api(messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 2000) -> str:
-    if not DEEPSEEK_API_KEY:
-        return "❌ API Error: DEEPSEEK_API_KEY is not set."
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
-    }
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens
-    }
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+    payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
     try:
-        resp = requests.post(
-            f"{DEEPSEEK_API_BASE}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
+        resp = requests.post(f"{DEEPSEEK_API_BASE}/chat/completions", headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
@@ -114,26 +84,23 @@ def extract_text_from_pdf(file_path: str) -> str:
     try:
         with open(file_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() or ""
-            return text
-    except Exception as e:
-        return f"Error extracting PDF: {str(e)}"
+            return " ".join([page.extract_text() or "" for page in pdf_reader.pages])
+    except:
+        return ""
 
 def extract_text_from_docx(file_path: str) -> str:
     try:
         doc = Document(file_path)
         return "\n".join([p.text for p in doc.paragraphs])
-    except Exception as e:
-        return f"Error extracting DOCX: {str(e)}"
+    except:
+        return ""
 
 def extract_text_from_txt(file_path: str) -> str:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
-    except Exception as e:
-        return f"Error reading TXT: {str(e)}"
+    except:
+        return ""
 
 def extract_text_from_file(file_path: str, file_format: str) -> str:
     if file_format == "pdf":
@@ -142,31 +109,25 @@ def extract_text_from_file(file_path: str, file_format: str) -> str:
         return extract_text_from_docx(file_path)
     elif file_format == "txt":
         return extract_text_from_txt(file_path)
-    elif file_format in ["xlsx", "xls", "png", "jpg", "jpeg"]:
-        return ""
-    return "Unsupported format for text extraction"
+    return ""
 
 def generate_embedding(text: str) -> List[float]:
     text_hash = hashlib.md5((text or "").encode()).hexdigest()
     fake = [float(int(text_hash[i:i+2], 16)) / 255.0 for i in range(0, 32, 2)]
-    fake = fake + [0.0] * (1536 - len(fake))
-    return fake[:1536]
+    return (fake + [0.0] * 1536)[:1536]
 
 def cosine_similarity(v1: List[float], v2: List[float]) -> float:
-    dot = sum(a*b for a, b in zip(v1, v2))
+    dot = sum(a*b for a,b in zip(v1, v2))
     m1 = sum(a*a for a in v1) ** 0.5
     m2 = sum(b*b for b in v2) ** 0.5
-    if m1 == 0 or m2 == 0:
-        return 0.0
-    return dot / (m1 * m2)
+    return dot / (m1 * m2) if m1 and m2 else 0.0
 
 def file_to_data_uri(path: str, mime: str) -> str:
     with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    return f"data:{mime};base64,{b64}"
+        return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
 
 # ============================================================================
-# AUTO ANNOTATION (LLM)
+# AUTO ANNOTATION
 # ============================================================================
 
 AUTO_ANNOTATE_SYSTEM = """You are an underwriting document auto-tagger.
@@ -179,117 +140,90 @@ Given raw extracted text and the filename, produce a STRICT JSON object with:
   "case_summary": string,
   "key_insights": string
 }
-Rules:
-- Return ONLY valid JSON. No commentary.
-- If unavailable, use 'Other' / 'Earlier' conservatively.
-"""
+Rules: Return ONLY valid JSON. No commentary."""
 
 def auto_annotate_by_llm(extracted_text: str, filename: str) -> Dict[str, Any]:
     user_prompt = f"FILENAME: {filename}\nTEXT:\n{(extracted_text or '')[:4000]}"
     content = call_deepseek_api(
-        messages=[
-            {"role": "system", "content": AUTO_ANNOTATE_SYSTEM},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.2,
-        max_tokens=700
+        messages=[{"role":"system","content":AUTO_ANNOTATE_SYSTEM},
+                  {"role":"user","content":user_prompt}],
+        temperature=0.2, max_tokens=700
     )
     try:
-        cleaned = content.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
-            if cleaned.endswith("```"):
-                cleaned = cleaned.rsplit("```", 1)[0]
-        data = json.loads(cleaned)
-    except Exception:
+        cleaned = content.strip().strip("`").split("\n", 1)[-1].rsplit("```", 1)[0] if "```" in content else content
+        data = json.loads(cleaned.strip())
+    except:
         data = {
-            "tags": {"equipment": ["Other"], "industry": ["Other"], "timeline": ["Earlier"]},
-            "decision": "Pending",
-            "premium": 0,
-            "risk_level": "Medium",
-            "case_summary": "Auto-tagging failed. Placeholder values used.",
-            "key_insights": "Please re-run auto-tagging if needed."
+            "tags":{"equipment":["Other"],"industry":["Other"],"timeline":["Earlier"]},
+            "decision":"Pending","premium":0,"risk_level":"Medium",
+            "case_summary":"Auto-tagging failed.","key_insights":"Please re-run."
         }
     data.setdefault("tags", {})
-    data["tags"].setdefault("equipment", ["Other"])
-    data["tags"].setdefault("industry", ["Other"])
-    data["tags"].setdefault("timeline", ["Earlier"])
-    data.setdefault("decision", "Pending")
-    data.setdefault("premium", 0)
-    data.setdefault("risk_level", "Medium")
-    data.setdefault("case_summary", "")
-    data.setdefault("key_insights", "")
+    for k in ["equipment","industry","timeline"]:
+        data["tags"].setdefault(k, ["Other" if k!="timeline" else "Earlier"])
+    for k,v in [("decision","Pending"),("premium",0),("risk_level","Medium"),("case_summary",""),("key_insights","")]:
+        data.setdefault(k,v)
     return data
 
 # ============================================================================
-# WORKSPACE（默认知识库）
+# KNOWLEDGE BASE
 # ============================================================================
 
-class Workspace:
-    def __init__(self, name: str):
-        self.name = name
-        self.workspace_dir = os.path.join(WORKSPACES_DIR, name)
-        self.documents_dir = os.path.join(self.workspace_dir, "documents")
-        self.metadata_file = os.path.join(self.workspace_dir, "metadata.json")
-        self.embeddings_file = os.path.join(self.workspace_dir, "embeddings.json")
-        os.makedirs(self.documents_dir, exist_ok=True)
+class KnowledgeBase:
+    def __init__(self):
         self.metadata = self._load_metadata()
         self.embeddings = self._load_embeddings()
-
+    
     def _load_metadata(self):
-        if os.path.exists(self.metadata_file):
-            with open(self.metadata_file, 'r', encoding='utf-8') as f:
+        if os.path.exists(METADATA_FILE):
+            with open(METADATA_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         return []
-
+    
     def _save_metadata(self):
-        with open(self.metadata_file, 'w', encoding='utf-8') as f:
+        with open(METADATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.metadata, f, ensure_ascii=False, indent=2)
-
+    
     def _load_embeddings(self):
-        if os.path.exists(self.embeddings_file):
-            with open(self.embeddings_file, 'r', encoding='utf-8') as f:
+        if os.path.exists(EMBEDDINGS_FILE):
+            with open(EMBEDDINGS_FILE, 'r') as f:
                 return json.load(f)
         return {}
-
+    
     def _save_embeddings(self):
-        with open(self.embeddings_file, 'w', encoding='utf-8') as f:
+        with open(EMBEDDINGS_FILE, 'w') as f:
             json.dump(self.embeddings, f, indent=2)
-
-    def add_document(self, uploaded_file, tags: Dict[str, List[str]],
+    
+    def add_document(self, uploaded_file, tags: Dict[str, List[str]], 
                      case_summary: str, key_insights: str,
                      decision: str, premium: int, risk_level: str,
                      extracted_text_preview: str = "") -> Dict[str, Any]:
         doc_id = f"DOC-{datetime.now().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(uploaded_file.name.encode()).hexdigest()[:6].upper()}"
         ext = uploaded_file.name.split('.')[-1].lower()
         filename = f"{doc_id}.{ext}"
-        file_path = os.path.join(self.documents_dir, filename)
+        file_path = os.path.join(DOCUMENTS_DIR, filename)
+        
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
+        
         full_text = f"{case_summary} {key_insights} {extracted_text_preview[:1000]}"
         embedding = generate_embedding(full_text)
+        
         doc_meta = {
-            "doc_id": doc_id,
-            "filename": uploaded_file.name,
-            "file_format": ext,
-            "file_path": file_path,
-            "file_size_kb": uploaded_file.size / 1024,
-            "upload_date": datetime.now().isoformat(),
-            "tags": tags,
-            "decision": decision,
-            "premium": premium,
-            "risk_level": risk_level,
-            "case_summary": case_summary,
-            "key_insights": key_insights,
+            "doc_id": doc_id, "filename": uploaded_file.name, "file_format": ext,
+            "file_path": file_path, "file_size_kb": uploaded_file.size/1024,
+            "upload_date": datetime.now().isoformat(), "tags": tags,
+            "decision": decision, "premium": premium, "risk_level": risk_level,
+            "case_summary": case_summary, "key_insights": key_insights,
             "extracted_text_preview": extracted_text_preview[:500]
         }
+        
         self.metadata.append(doc_meta)
         self.embeddings[doc_id] = embedding
         self._save_metadata()
         self._save_embeddings()
         return doc_meta
-
+    
     def search_documents(self, query: str, top_k: int = 5):
         if not self.metadata:
             return []
@@ -307,117 +241,99 @@ class Workspace:
                 scored.append((sim, doc))
         scored.sort(reverse=True, key=lambda x: x[0])
         return [d for _, d in scored[:top_k]]
-
+    
     def delete_document(self, doc_id: str):
         self.metadata = [d for d in self.metadata if d["doc_id"] != doc_id]
         if doc_id in self.embeddings:
             del self.embeddings[doc_id]
-        for fn in os.listdir(self.documents_dir):
+        for fn in os.listdir(DOCUMENTS_DIR):
             if fn.startswith(doc_id):
-                os.remove(os.path.join(self.documents_dir, fn))
+                os.remove(os.path.join(DOCUMENTS_DIR, fn))
         self._save_metadata()
         self._save_embeddings()
-
+    
     def get_stats(self):
         return {
             "total_documents": len(self.metadata),
-            "total_size_mb": sum(d["file_size_kb"] for d in self.metadata) / 1024 if self.metadata else 0.0,
-            "format_distribution": self._get_fmt_dist(),
-            "decision_distribution": self._get_decision_dist()
+            "total_size_mb": sum(d["file_size_kb"] for d in self.metadata)/1024 if self.metadata else 0.0,
         }
 
-    def _get_fmt_dist(self):
-        dist = {}
-        for d in self.metadata:
-            dist[d["file_format"]] = dist.get(d["file_format"], 0) + 1
-        return dist
-
-    def _get_decision_dist(self):
-        dist = {}
-        for d in self.metadata:
-            dist[d["decision"]] = dist.get(d["decision"], 0) + 1
-        return dist
-
 # ============================================================================
-# CHAT SESSION PERSISTENCE（多会话 + 本地持久化）
+# CONVERSATION MANAGEMENT
 # ============================================================================
 
-def _load_chat_sessions() -> List[Dict[str, Any]]:
-    if os.path.exists(CHATS_INDEX_FILE):
-        try:
-            with open(CHATS_INDEX_FILE, "r", encoding="utf-8") as f:
+class ConversationManager:
+    def __init__(self):
+        self.conversations_file = os.path.join(CONVERSATIONS_DIR, "conversations.json")
+        self.conversations = self._load_conversations()
+    
+    def _load_conversations(self) -> Dict[str, Dict]:
+        if os.path.exists(self.conversations_file):
+            with open(self.conversations_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except Exception:
-            return []
-    return []
-
-def _save_chat_sessions(sessions: List[Dict[str, Any]]):
-    with open(CHATS_INDEX_FILE, "w", encoding="utf-8") as f:
-        json.dump(sessions, f, ensure_ascii=False, indent=2)
-
-def _chat_file_path(session_id: str) -> str:
-    return os.path.join(CHATS_DIR, f"{session_id}.json")
-
-def _load_session_messages(session_id: str) -> List[Dict[str, str]]:
-    path = _chat_file_path(session_id)
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
-def _save_session_messages(session_id: str, messages: List[Dict[str, str]]):
-    path = _chat_file_path(session_id)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
-
-def create_chat_session(title: str = "New chat") -> Dict[str, Any]:
-    sessions = _load_chat_sessions()
-    now = datetime.now()
-    sid_raw = now.isoformat()
-    sid = hashlib.md5(sid_raw.encode()).hexdigest()[:8].upper()
-    session_id = f"{now.strftime('%Y%m%d%H%M%S')}-{sid}"
-    session = {
-        "id": session_id,
-        "title": title,
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat()
-    }
-    sessions.append(session)
-    _save_chat_sessions(sessions)
-    _save_session_messages(session_id, [])
-    return session
-
-def update_chat_session_meta(session_id: str, title: str | None = None):
-    sessions = _load_chat_sessions()
-    changed = False
-    now = datetime.now().isoformat()
-    for s in sessions:
-        if s["id"] == session_id:
-            s["updated_at"] = now
-            if title and (s.get("title") in ["New chat", "", None]):
-                s["title"] = title
-            changed = True
-            break
-    if changed:
-        _save_chat_sessions(sessions)
+        return {}
+    
+    def _save_conversations(self):
+        with open(self.conversations_file, 'w', encoding='utf-8') as f:
+            json.dump(self.conversations, f, ensure_ascii=False, indent=2)
+    
+    def create_conversation(self, title: str = None) -> str:
+        conv_id = f"CONV-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        if not title:
+            title = f"New Chat"
+        self.conversations[conv_id] = {
+            "id": conv_id, "title": title,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "messages": []
+        }
+        self._save_conversations()
+        return conv_id
+    
+    def add_message(self, conv_id: str, role: str, content: str):
+        if conv_id in self.conversations:
+            self.conversations[conv_id]["messages"].append({
+                "role": role, "content": content, "timestamp": datetime.now().isoformat()
+            })
+            self.conversations[conv_id]["updated_at"] = datetime.now().isoformat()
+            if role == "user" and len(self.conversations[conv_id]["messages"]) == 1:
+                auto_title = content[:35] + ("..." if len(content) > 35 else "")
+                self.conversations[conv_id]["title"] = auto_title
+            self._save_conversations()
+    
+    def delete_conversation(self, conv_id: str):
+        if conv_id in self.conversations:
+            del self.conversations[conv_id]
+            self._save_conversations()
+    
+    def get_conversation(self, conv_id: str) -> Dict:
+        return self.conversations.get(conv_id, None)
+    
+    def get_all_conversations(self) -> List[Dict]:
+        convs = list(self.conversations.values())
+        convs.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        return convs
+    
+    def update_conversation_title(self, conv_id: str, title: str):
+        if conv_id in self.conversations:
+            self.conversations[conv_id]["title"] = title
+            self.conversations[conv_id]["updated_at"] = datetime.now().isoformat()
+            self._save_conversations()
+    
+    def clear_conversation(self, conv_id: str):
+        if conv_id in self.conversations:
+            self.conversations[conv_id]["messages"] = []
+            self.conversations[conv_id]["updated_at"] = datetime.now().isoformat()
+            self._save_conversations()
 
 # ============================================================================
-# CHAT (RAG + CoT)
+# CHAT
 # ============================================================================
 
 def generate_cot_response(query: str, retrieved_docs: List[Dict[str, Any]]) -> str:
     if not retrieved_docs:
-        # 没有文档时兜底
-        return call_deepseek_api(
-            [
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": f"Query: {query}\n\nNo retrieved cases available. Please answer based on general underwriting principles."}
-            ]
-        )
-
+        return "⚠️ **No Relevant Cases Found**\n\nPlease add documents to the knowledge base or try a different query."
+    
     docs_text = ""
     for doc in retrieved_docs:
         equipment = ", ".join(doc["tags"].get("equipment", []))
@@ -429,97 +345,364 @@ DOCUMENT #{doc["doc_id"]}
 {'='*70}
 File: {doc["filename"]} ({doc["file_format"].upper()})
 Tags: 🔧 {equipment} | 🏭 {industry} | 📅 {timeline}
+Decision: {doc["decision"]} | Premium: ${doc["premium"]:,} | Risk: {doc["risk_level"]}
 
-Decision: {doc["decision"]}
-Premium: ${doc["premium"]:,}
-Risk Level: {doc["risk_level"]}
-
-Case Summary:
-{doc["case_summary"]}
-
-Key Insights:
-{doc["key_insights"]}
-
+Summary: {doc["case_summary"]}
+Insights: {doc["key_insights"]}
 """
+    
     messages = [
-        {"role": "system", "content": SYSTEM_INSTRUCTION},
-        {"role": "user", "content": f"""Query: "{query}"
-
-Retrieved Cases:
-{docs_text}
-
-Please analyze using the 5-step CoT framework:
-1. Extract key tags from query
-2. Analyze retrieved precedents
-3. Check recency & applicability
-4. Identify decision patterns
-5. Recommend with rationale
-
-Provide: Decision + Premium Range + Sources"""}
+        {"role":"system","content":SYSTEM_INSTRUCTION},
+        {"role":"user","content":f'Query: "{query}"\n\nRetrieved Cases:\n{docs_text}\n\nAnalyze using 5-step CoT framework and provide: Decision + Premium Range + Sources'}
     ]
     return call_deepseek_api(messages)
 
 # ============================================================================
-# UI: CSS
+# CSS
 # ============================================================================
 
-def inject_css(appearance: str):
-    if appearance == "Dark":
+def inject_css(theme: str):
+    if theme == "Dark":
         css = """
         <style>
+        /* Dark Theme */
         :root {
+            --bg-primary: #0b1220;
+            --bg-secondary: #1a2332;
+            --bg-tertiary: #243447;
             --text-primary: #e5e7eb;
-            --text-secondary: #cbd5e1;
-            --muted: #9ca3af;
-            --bg-app: #0b1220;
-            --card-bg: #101826;
-            --shadow: 0 1px 3px rgba(0,0,0,0.5);
-            --brand: #93c5fd;
-            --green: #86efac;
-            --amber: #fde68a;
+            --text-secondary: #9ca3af;
+            --border: #374151;
+            --active-bg: #1e40af;
+            --hover-bg: #1e293b;
         }
-        .stApp { background-color: var(--bg-app); color: var(--text-primary); }
-        .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
-        .sub-header  { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color:#0b1220; }
-        .tag-equipment { background-color: #93c5fd; }
-        .tag-industry  { background-color: #86efac; }
-        .tag-timeline  { background-color: #fde68a; }
-        .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
-        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
+        
+        /* Hide Streamlit defaults */
         #MainMenu, footer, header {visibility: hidden;}
+        .stApp {background: var(--bg-primary); color: var(--text-primary);}
+        
+        /* Navigation Bar */
+        .nav-container {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 280px;
+            height: 100vh;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            z-index: 1000;
+        }
+        
+        .nav-header {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .nav-btn {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            color: var(--text-primary);
+            cursor: pointer;
+            text-align: left;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+        
+        .nav-btn:hover {
+            background: var(--hover-bg);
+            border-color: var(--active-bg);
+        }
+        
+        .nav-btn-active {
+            background: var(--active-bg) !important;
+            border-color: var(--active-bg) !important;
+        }
+        
+        .chat-list {
+            flex: 1;
+            overflow-y: auto;
+            margin-top: 1rem;
+        }
+        
+        .chat-item {
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .chat-item:hover {
+            background: var(--hover-bg);
+        }
+        
+        .chat-item-active {
+            background: var(--active-bg) !important;
+            border-color: var(--active-bg) !important;
+        }
+        
+        .chat-title {
+            flex: 1;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .chat-delete {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 0.25rem;
+        }
+        
+        .chat-delete:hover {
+            color: #ef4444;
+        }
+        
+        /* Main Content Area */
+        .main-content {
+            margin-left: 300px;
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        
+        /* Chat Messages */
+        .chat-container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        .message-user {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+        
+        .message-assistant {
+            background: var(--bg-secondary);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            margin-bottom: 1rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        
+        /* Tags */
+        .tag-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            margin: 0.25rem 0.25rem 0.25rem 0;
+            border-radius: 1rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+        .tag-equipment { background: #3b82f6; color: white; }
+        .tag-industry { background: #10b981; color: white; }
+        .tag-timeline { background: #f59e0b; color: white; }
+        
+        /* Override Streamlit styles */
+        .stChatMessage, .stMarkdown, p, li, label, span, div {
+            color: var(--text-primary) !important;
+        }
+        
+        /* Metrics */
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
+            color: var(--text-primary) !important;
+        }
         </style>
         """
     else:
         css = """
         <style>
+        /* Light Theme */
         :root {
-            --text-primary: #0f172a;
-            --text-secondary: #374151;
-            --muted: #6b7280;
-            --bg-app: #f5f7fa;
-            --card-bg: #ffffff;
-            --shadow: 0 1px 3px rgba(0,0,0,0.1);
-            --brand: #1e40af;
-            --green: #166534;
-            --amber: #92400e;
+            --bg-primary: #f9fafb;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #f3f4f6;
+            --text-primary: #111827;
+            --text-secondary: #6b7280;
+            --border: #e5e7eb;
+            --active-bg: #3b82f6;
+            --hover-bg: #f3f4f6;
         }
-        .stApp { background-color: var(--bg-app); color: var(--text-primary); }
-        .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
-        .sub-header  { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color: var(--text-primary); }
-        .tag-equipment { background-color: #dbeafe; }
-        .tag-industry  { background-color: #dcfce7; }
-        .tag-timeline  { background-color: #fef3c7; }
-        .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
-        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
+        
         #MainMenu, footer, header {visibility: hidden;}
+        .stApp {background: var(--bg-primary); color: var(--text-primary);}
+        
+        .nav-container {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 280px;
+            height: 100vh;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            z-index: 1000;
+        }
+        
+        .nav-header {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .nav-btn {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            color: var(--text-primary);
+            cursor: pointer;
+            text-align: left;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+        
+        .nav-btn:hover {
+            background: var(--hover-bg);
+            border-color: var(--active-bg);
+        }
+        
+        .nav-btn-active {
+            background: var(--active-bg) !important;
+            border-color: var(--active-bg) !important;
+            color: white !important;
+        }
+        
+        .chat-list {
+            flex: 1;
+            overflow-y: auto;
+            margin-top: 1rem;
+        }
+        
+        .chat-item {
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .chat-item:hover {
+            background: var(--hover-bg);
+            border-color: var(--active-bg);
+        }
+        
+        .chat-item-active {
+            background: var(--active-bg) !important;
+            border-color: var(--active-bg) !important;
+        }
+        
+        .chat-title {
+            flex: 1;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .chat-item-active .chat-title {
+            color: white !important;
+        }
+        
+        .chat-delete {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            cursor: pointer;
+            padding: 0.25rem;
+        }
+        
+        .chat-delete:hover {
+            color: #ef4444;
+        }
+        
+        .main-content {
+            margin-left: 300px;
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        
+        .chat-container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        .message-user {
+            background: var(--bg-tertiary);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+        
+        .message-assistant {
+            background: var(--bg-secondary);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            margin-bottom: 1rem;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        
+        .tag-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            margin: 0.25rem 0.25rem 0.25rem 0;
+            border-radius: 1rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+        .tag-equipment { background: #dbeafe; color: #1e40af; }
+        .tag-industry { background: #d1fae5; color: #065f46; }
+        .tag-timeline { background: #fef3c7; color: #92400e; }
+        
+        .stChatMessage, .stMarkdown, p, li, label, span, div {
+            color: var(--text-primary) !important;
+        }
+        
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
+            color: var(--text-primary) !important;
+        }
         </style>
         """
     st.markdown(css, unsafe_allow_html=True)
 
 # ============================================================================
-# MAIN
+# MAIN APP
 # ============================================================================
 
 def main():
@@ -527,321 +710,279 @@ def main():
         page_title="Underwriting Assistant",
         page_icon="🤖",
         layout="wide",
-        initial_sidebar_state="expanded"
+        initial_sidebar_state="collapsed"
     )
-
-    workspace = Workspace(DEFAULT_WORKSPACE_NAME)
-    stats = workspace.get_stats()
-
-    # Sidebar：只放主题 & 知识库统计
-    with st.sidebar:
-        st.markdown("### 🎨 Appearance")
-        appearance = st.radio("Theme", ["Light", "Dark"], horizontal=True, key="appearance_choice")
-
-        st.markdown("---")
-        st.markdown("### 📊 Knowledge Base")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Documents", stats["total_documents"])
-        with c2:
-            st.metric("Size", f"{stats['total_size_mb']:.1f} MB")
-        if stats["format_distribution"]:
-            st.markdown("**Formats:**")
-            for fmt, count in stats["format_distribution"].items():
-                st.write(f"{SUPPORTED_FORMATS.get(fmt, fmt)}: {count}")
-
-    inject_css(appearance)
-
-    # 主标题
-    st.markdown('<div class="main-header">🤖 Underwriting Assistant</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">RAG + CoT | Multimodal Extraction | Vector DB</div>', unsafe_allow_html=True)
-
-    # Tabs
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "📄 Documents", "📤 Upload (Auto-Tag)"])
-
-    # ======================================================================
-    # TAB 1: CHAT（左：导航条；右：聊天区）
-    # ======================================================================
-    with tab1:
-        st.markdown("### 💬 Chat with AI Assistant")
-
-        # 载入/初始化会话列表
-        sessions = _load_chat_sessions()
-        if not sessions:
-            default_session = create_chat_session()
-            sessions = _load_chat_sessions()
-
-        sessions_sorted = sorted(sessions, key=lambda s: s.get("updated_at", ""), reverse=True)
-
-        if "current_session_id" not in st.session_state:
-            st.session_state.current_session_id = sessions_sorted[0]["id"]
-
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-        if "loaded_for" not in st.session_state:
-            st.session_state.loaded_for = None
-
-        # 左右两栏：左侧会话列表，右侧聊天内容
-        left_col, right_col = st.columns([0.8, 2.2])
-
-        # -------- 左侧：导航条（会话列表 + 新建） --------
-        with left_col:
-            st.markdown("#### 📂 Chats")
-
-            # New Chat 按钮
-            if st.button("➕ New Chat", use_container_width=True):
-                new_sess = create_chat_session()
-                st.session_state.current_session_id = new_sess["id"]
-                st.session_state.messages = []
-                st.session_state.loaded_for = new_sess["id"]
-                st.rerun()
-
-            # 会话列表（radio）
-            label_to_id = {s["title"]: s["id"] for s in sessions_sorted}
-            current_id = st.session_state.current_session_id
-            current_label = next(
-                (lbl for lbl, sid in label_to_id.items() if sid == current_id),
-                list(label_to_id.keys())[0]
-            )
-
-            selected_label = st.radio(
-                "Sessions",
-                options=list(label_to_id.keys()),
-                index=list(label_to_id.keys()).index(current_label),
-                key="chat_session_selector"
-            )
-            selected_id = label_to_id[selected_label]
-
-            # 如果切换了会话，重新加载 messages
-            if (selected_id != current_id or
-                st.session_state.get("loaded_for") != selected_id):
-                st.session_state.current_session_id = selected_id
-                st.session_state.messages = _load_session_messages(selected_id)
-                st.session_state.loaded_for = selected_id
-                st.rerun()
-
-        # -------- 右侧：聊天内容 --------
-        with right_col:
-            if stats["total_documents"] == 0:
-                st.warning("⚠️ No documents yet. Upload in 'Upload (Auto-Tag)'. The assistant will still reply, but without case references.")
-
-            # 展示历史消息
-            for m in st.session_state.messages:
-                with st.chat_message(m["role"]):
-                    st.markdown(m["content"])
-
-            # 输入框
-            prompt = st.chat_input("Ask about underwriting cases...")
-            if prompt:
-                # 用户消息
-                st.session_state.messages.append({"role": "user", "content": prompt})
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-
-                # 用第一条 user 消息自动更新会话标题
-                first_user_msg = next(
-                    (msg["content"] for msg in st.session_state.messages if msg["role"] == "user"),
-                    ""
-                )
-                short_title = (first_user_msg[:20] + "...") if len(first_user_msg) > 20 else first_user_msg
-                if short_title:
-                    update_chat_session_meta(st.session_state.current_session_id, title=short_title)
-
-                # Assistant 回复
-                with st.chat_message("assistant"):
-                    with st.spinner("🔍 Searching knowledge base..."):
-                        retrieved = workspace.search_documents(prompt, top_k=3)
-                        resp = generate_cot_response(prompt, retrieved)
-                        st.markdown(resp)
-                        if retrieved:
-                            with st.expander(f"📚 {len(retrieved)} Retrieved Documents"):
-                                for d in retrieved:
-                                    st.markdown(f"**{d['doc_id']}** - {d['filename']}")
-                                    tags_html = ""
-                                    for t in d["tags"].get("equipment", []):
-                                        tags_html += f'<span class="tag-badge tag-equipment">🔧 {t}</span>'
-                                    for t in d["tags"].get("industry", []):
-                                        tags_html += f'<span class="tag-badge tag-industry">🏭 {t}</span>'
-                                    for t in d["tags"].get("timeline", []):
-                                        tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
-                                    st.markdown(tags_html, unsafe_allow_html=True)
-                                    st.markdown("---")
-
-                # 保存 assistant 消息 & 持久化该会话
-                st.session_state.messages.append({"role": "assistant", "content": resp})
-                _save_session_messages(st.session_state.current_session_id, st.session_state.messages)
-                update_chat_session_meta(st.session_state.current_session_id)
-
-    # ======================================================================
-    # TAB 2: DOCUMENTS
-    # ======================================================================
-    with tab2:
-        st.markdown("### 📄 Knowledge Base")
-        if not workspace.metadata:
-            st.info("No documents yet. Upload in 'Upload (Auto-Tag)'.")
+    
+    # Initialize
+    kb = KnowledgeBase()
+    conv_mgr = ConversationManager()
+    
+    # Session state
+    if "current_conv_id" not in st.session_state:
+        all_convs = conv_mgr.get_all_conversations()
+        if all_convs:
+            st.session_state.current_conv_id = all_convs[0]["id"]
         else:
-            left, right = st.columns([1, 2.2])
+            st.session_state.current_conv_id = conv_mgr.create_conversation()
+    
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = "chat"
+    
+    if "theme" not in st.session_state:
+        st.session_state.theme = "Light"
+    
+    # Apply CSS
+    inject_css(st.session_state.theme)
+    
+    # Left Navigation Bar (using columns to simulate fixed sidebar)
+    all_convs = conv_mgr.get_all_conversations()
+    
+    col_nav, col_main = st.columns([1, 4])
+    
+    with col_nav:
+        st.markdown('<div class="nav-header">🤖 Underwriting AI</div>', unsafe_allow_html=True)
+        
+        # Theme toggle
+        if st.button("🎨 " + st.session_state.theme, use_container_width=True):
+            st.session_state.theme = "Dark" if st.session_state.theme == "Light" else "Light"
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # New Chat Button
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            new_id = conv_mgr.create_conversation()
+            st.session_state.current_conv_id = new_id
+            st.session_state.current_page = "chat"
+            st.rerun()
+        
+        # Navigation Buttons
+        if st.button("💬 Chats", use_container_width=True, 
+                    type="primary" if st.session_state.current_page == "chat" else "secondary"):
+            st.session_state.current_page = "chat"
+            st.rerun()
+        
+        if st.button("📄 Knowledge Base", use_container_width=True,
+                    type="primary" if st.session_state.current_page == "kb" else "secondary"):
+            st.session_state.current_page = "kb"
+            st.rerun()
+        
+        if st.button("📤 Upload", use_container_width=True,
+                    type="primary" if st.session_state.current_page == "upload" else "secondary"):
+            st.session_state.current_page = "upload"
+            st.rerun()
+        
+        st.markdown("---")
+        st.markdown("#### Recent Chats")
+        
+        # Chat List
+        for conv in all_convs[:15]:  # Show max 15 recent chats
+            conv_id = conv["id"]
+            is_active = (conv_id == st.session_state.current_conv_id)
+            
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                if st.button(
+                    f"{'📌' if is_active else '💬'} {conv['title'][:28]}",
+                    key=f"nav_conv_{conv_id}",
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary"
+                ):
+                    st.session_state.current_conv_id = conv_id
+                    st.session_state.current_page = "chat"
+                    st.rerun()
+            
+            with col2:
+                if st.button("🗑️", key=f"nav_del_{conv_id}", use_container_width=True):
+                    conv_mgr.delete_conversation(conv_id)
+                    remaining = conv_mgr.get_all_conversations()
+                    if remaining:
+                        st.session_state.current_conv_id = remaining[0]["id"]
+                    else:
+                        st.session_state.current_conv_id = conv_mgr.create_conversation()
+                    st.rerun()
+        
+        # Stats at bottom
+        st.markdown("---")
+        stats = kb.get_stats()
+        st.metric("📚 Documents", stats["total_documents"])
+        st.caption(f"Size: {stats['total_size_mb']:.1f} MB")
+    
+    # Main Content Area
+    with col_main:
+        if st.session_state.current_page == "chat":
+            render_chat_page(kb, conv_mgr)
+        elif st.session_state.current_page == "kb":
+            render_kb_page(kb)
+        elif st.session_state.current_page == "upload":
+            render_upload_page(kb)
 
-            with left:
-                st.markdown("#### 📚 Knowledge Base Browser")
-                q = st.text_input("Search title/tags...", key="kb_search")
-                fe = st.multiselect("🔧 Equipment", TAG_OPTIONS["equipment"])
-                fi = st.multiselect("🏭 Industry", TAG_OPTIONS["industry"])
-                ft = st.multiselect("📅 Timeline", TAG_OPTIONS["timeline"])
+def render_chat_page(kb: KnowledgeBase, conv_mgr: ConversationManager):
+    current_conv = conv_mgr.get_conversation(st.session_state.current_conv_id)
+    
+    if not current_conv:
+        st.error("Conversation not found")
+        return
+    
+    st.title(f"💬 {current_conv['title']}")
+    
+    # Rename option
+    with st.expander("✏️ Rename Chat"):
+        new_title = st.text_input("New title", value=current_conv['title'], key="rename_input")
+        if st.button("Update Title"):
+            conv_mgr.update_conversation_title(st.session_state.current_conv_id, new_title)
+            st.success("Updated!")
+            st.rerun()
+    
+    # Display messages
+    for msg in current_conv["messages"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+    
+    # Chat input
+    if prompt := st.chat_input("Ask about underwriting cases..."):
+        conv_mgr.add_message(st.session_state.current_conv_id, "user", prompt)
+        
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Searching..."):
+                retrieved = kb.search_documents(prompt, top_k=3)
+                resp = generate_cot_response(prompt, retrieved)
+                st.markdown(resp)
+                
+                if retrieved:
+                    with st.expander(f"📚 {len(retrieved)} Retrieved Documents"):
+                        for d in retrieved:
+                            st.markdown(f"**{d['doc_id']}** - {d['filename']}")
+                            tags_html = ""
+                            for t in d["tags"].get("equipment", []):
+                                tags_html += f'<span class="tag-badge tag-equipment">🔧 {t}</span>'
+                            for t in d["tags"].get("industry", []):
+                                tags_html += f'<span class="tag-badge tag-industry">🏭 {t}</span>'
+                            for t in d["tags"].get("timeline", []):
+                                tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
+                            st.markdown(tags_html, unsafe_allow_html=True)
+                            st.markdown("---")
+        
+        conv_mgr.add_message(st.session_state.current_conv_id, "assistant", resp)
+        st.rerun()
+    
+    # Clear chat
+    if st.button("🗑️ Clear Chat History"):
+        if st.checkbox("Confirm"):
+            conv_mgr.clear_conversation(st.session_state.current_conv_id)
+            st.success("Cleared!")
+            st.rerun()
 
-                docs = workspace.metadata
-                if q:
-                    ql = q.lower()
-                    docs = [
-                        d for d in docs
-                        if (ql in d["filename"].lower() or
-                            any(ql in tag.lower() for v in d["tags"].values() for tag in v))
-                    ]
-                if fe:
-                    docs = [d for d in docs if any(t in d["tags"].get("equipment", []) for t in fe)]
-                if fi:
-                    docs = [d for d in docs if any(t in d["tags"].get("industry", []) for t in fi)]
-                if ft:
-                    docs = [d for d in docs if any(t in d["tags"].get("timeline", []) for t in ft)]
-
-                docs = sorted(docs, key=lambda d: d.get("upload_date", ""), reverse=True)
-
-                options = {
-                    f"{SUPPORTED_FORMATS.get(d['file_format'], '📎')} {d['filename']} [{d['doc_id']}]": d["doc_id"]
-                    for d in docs
-                }
-                selected_doc = None
-                if options:
-                    selected_label_doc = st.radio("Documents", list(options.keys()), index=0, key="kb_selected")
-                    selected_id_doc = options[selected_label_doc]
-                    selected_doc = next((d for d in docs if d["doc_id"] == selected_id_doc), None)
-
-                if selected_doc and st.button("🗑️ Delete Selected"):
-                    workspace.delete_document(selected_doc["doc_id"])
-                    st.success("Document deleted!")
+def render_kb_page(kb: KnowledgeBase):
+    st.title("📄 Knowledge Base")
+    
+    if not kb.metadata:
+        st.info("No documents. Upload in Upload tab.")
+        return
+    
+    # Search and filters
+    q = st.text_input("🔍 Search", placeholder="Search documents...")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        fe = st.multiselect("🔧 Equipment", TAG_OPTIONS["equipment"])
+    with col2:
+        fi = st.multiselect("🏭 Industry", TAG_OPTIONS["industry"])
+    with col3:
+        ft = st.multiselect("📅 Timeline", TAG_OPTIONS["timeline"])
+    
+    # Filter docs
+    docs = kb.metadata
+    if q:
+        ql = q.lower()
+        docs = [d for d in docs if (ql in d["filename"].lower() or 
+                any(ql in tag.lower() for v in d["tags"].values() for tag in v))]
+    if fe:
+        docs = [d for d in docs if any(t in d["tags"].get("equipment", []) for t in fe)]
+    if fi:
+        docs = [d for d in docs if any(t in d["tags"].get("industry", []) for t in fi)]
+    if ft:
+        docs = [d for d in docs if any(t in d["tags"].get("timeline", []) for t in ft)]
+    
+    docs = sorted(docs, key=lambda d: d.get("upload_date",""), reverse=True)
+    
+    st.markdown(f"**{len(docs)} documents found**")
+    
+    # Display docs
+    for doc in docs:
+        with st.expander(f"{SUPPORTED_FORMATS.get(doc['file_format'],'📎')} {doc['filename']}"):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**ID:** `{doc['doc_id']}`")
+                st.markdown(f"**Decision:** {doc['decision']} | **Premium:** ${doc['premium']:,} | **Risk:** {doc['risk_level']}")
+                
+                tags_html = ""
+                for t in doc["tags"].get("equipment", []):
+                    tags_html += f'<span class="tag-badge tag-equipment">🔧 {t}</span>'
+                for t in doc["tags"].get("industry", []):
+                    tags_html += f'<span class="tag-badge tag-industry">🏭 {t}</span>'
+                for t in doc["tags"].get("timeline", []):
+                    tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
+                st.markdown(tags_html, unsafe_allow_html=True)
+                
+                st.write("**Summary:**")
+                st.info(doc["case_summary"])
+            
+            with col2:
+                with open(doc["file_path"], "rb") as f:
+                    st.download_button("⬇️ Download", f, file_name=doc["filename"])
+                
+                if st.button("🗑️ Delete", key=f"del_{doc['doc_id']}"):
+                    kb.delete_document(doc["doc_id"])
+                    st.success("Deleted!")
                     st.rerun()
 
-            with right:
-                st.markdown("#### 👀 Preview Original")
-                if not selected_doc:
-                    st.info("Select a document on the left to preview.")
-                else:
-                    doc = selected_doc
-                    st.markdown(
-                        f"**{doc['filename']}**  \n"
-                        f"ID: `{doc['doc_id']}` | Format: **{doc['file_format'].upper()}** | "
-                        f"Size: {doc['file_size_kb']:.1f} KB"
-                    )
-
-                    with open(doc["file_path"], "rb") as f:
-                        st.download_button("⬇️ Download file", f, file_name=doc["filename"], mime=None)
-
-                    ext = doc["file_format"]
-                    path = doc["file_path"]
-
-                    if ext == "pdf":
-                        try:
-                            data_uri = file_to_data_uri(path, "application/pdf")
-                            html = f'<iframe src="{data_uri}" width="100%" height="800px" style="border:none;"></iframe>'
-                            st.components.v1.html(html, height=820, scrolling=True)
-                        except Exception as e:
-                            st.error(f"PDF preview failed: {e}")
-                    elif ext in ["png", "jpg", "jpeg"]:
-                        try:
-                            st.image(path, use_column_width=True)
-                        except Exception as e:
-                            st.error(f"Image preview failed: {e}")
-                    elif ext in ["docx", "doc"]:
-                        text = extract_text_from_docx(path) if ext == "docx" else "(DOC preview not supported; please download)"
-                        st.text_area("Extracted Text (preview)", value=text[:8000], height=400)
-                    elif ext == "txt":
-                        text = extract_text_from_txt(path)
-                        st.text_area("Text File (preview)", value=text[:8000], height=400)
-                    elif ext in ["xlsx", "xls"]:
-                        try:
-                            df = pd.read_excel(path)
-                            st.dataframe(df.head(200), use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Excel preview failed: {e}")
-                    else:
-                        st.info("Preview not supported for this file type. Please download to view.")
-
-                    st.markdown("---")
-                    st.markdown("**Auto Tags & Case Info**")
-                    tags_html = ""
-                    for t in doc["tags"].get("equipment", []):
-                        tags_html += f'<span class="tag-badge tag-equipment">🔧 {t}</span>'
-                    for t in doc["tags"].get("industry", []):
-                        tags_html += f'<span class="tag-badge tag-industry">🏭 {t}</span>'
-                    for t in doc["tags"].get("timeline", []):
-                        tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
-                    st.markdown(tags_html, unsafe_allow_html=True)
-
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.write(f"**Decision:** {doc['decision']}")
-                    with c2:
-                        st.write(f"**Premium:** ${doc['premium']:,}")
-                    with c3:
-                        st.write(f"**Risk:** {doc['risk_level']}")
-                    st.write("**Case Summary:**")
-                    st.info(doc["case_summary"])
-                    st.write("**Key Insights:**")
-                    st.write(doc["key_insights"])
-
-    # ======================================================================
-    # TAB 3: UPLOAD (Auto-Tag)
-    # ======================================================================
-    with tab3:
-        st.markdown("### 📤 Upload Document (Auto-Tag by Model)")
-        st.caption("只需上传文件，系统会自动抽取文本并由模型进行标签与条款识别。")
-
-        with st.form("upload_form_autotag"):
-            uploaded_file = st.file_uploader(
-                "Choose a document",
-                type=list(SUPPORTED_FORMATS.keys()),
-                help="Supported: PDF, Word, Excel, Text, Images"
+def render_upload_page(kb: KnowledgeBase):
+    st.title("📤 Upload Document")
+    
+    with st.form("upload_form"):
+        uploaded_file = st.file_uploader(
+            "Choose document",
+            type=list(SUPPORTED_FORMATS.keys())
+        )
+        submitted = st.form_submit_button("📤 Upload & Auto-Tag", use_container_width=True)
+    
+    if submitted and uploaded_file:
+        with st.spinner("Processing..."):
+            temp_id = f"TEMP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            ext = uploaded_file.name.split('.')[-1].lower()
+            temp_path = os.path.join(DOCUMENTS_DIR, f"{temp_id}.{ext}")
+            
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            extracted_text = extract_text_from_file(temp_path, ext)
+            auto = auto_annotate_by_llm(extracted_text, uploaded_file.name)
+            
+            doc = kb.add_document(
+                uploaded_file=uploaded_file,
+                tags=auto["tags"],
+                case_summary=auto["case_summary"],
+                key_insights=auto["key_insights"],
+                decision=auto["decision"],
+                premium=int(auto.get("premium", 0) or 0),
+                risk_level=auto["risk_level"],
+                extracted_text_preview=extracted_text[:800]
             )
-            submitted = st.form_submit_button("📤 Upload & Auto-Tag")
-
-        if submitted:
-            if not uploaded_file:
-                st.error("Please upload a document")
-            else:
-                with st.spinner("Processing document & auto-tagging..."):
-                    temp_id = f"TEMP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(uploaded_file.name.encode()).hexdigest()[:6].upper()}"
-                    ext = uploaded_file.name.split('.')[-1].lower()
-                    temp_path = os.path.join(workspace.documents_dir, f"{temp_id}.{ext}")
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-
-                    extracted_text = extract_text_from_file(temp_path, ext)
-                    auto = auto_annotate_by_llm(extracted_text, uploaded_file.name)
-
-                    doc = workspace.add_document(
-                        uploaded_file=uploaded_file,
-                        tags=auto["tags"],
-                        case_summary=auto["case_summary"],
-                        key_insights=auto["key_insights"],
-                        decision=auto["decision"],
-                        premium=int(auto.get("premium", 0) or 0),
-                        risk_level=auto["risk_level"],
-                        extracted_text_preview=extracted_text[:800]
-                    )
-
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    except Exception:
-                        pass
-
-                    st.success(f"✅ Document uploaded & auto-tagged: {doc['doc_id']}")
-                    with st.expander("🔎 Auto-Tag Result"):
-                        st.json(auto)
-
-# ============================================================================
-# RUN
-# ============================================================================
+            
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+            
+            st.success(f"✅ Uploaded: {doc['doc_id']}")
+            with st.expander("🔎 Auto-Tag Result"):
+                st.json(auto)
 
 if __name__ == "__main__":
     main()
