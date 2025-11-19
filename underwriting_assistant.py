@@ -672,8 +672,8 @@ def render_chat_page(kb, conv_mgr):
     
     # Chat input
     if prompt := st.chat_input("Ask about underwriting cases...", key="chat_input_field"):
-        if st.session_state.tour_active and st.session_state.tour_step == 4:
-            st.session_state.tour_step += 1
+        if st.session_state.tutorial_active and st.session_state.tutorial_step == 4:
+            st.session_state.tutorial_step += 1
         
         # Add user message
         conv_mgr.add_message(st.session_state.current_conv_id, "user", prompt)
