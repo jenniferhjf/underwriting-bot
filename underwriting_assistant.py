@@ -1,6 +1,6 @@
 """
-Underwriting Assistant - COMPLETE VERSION
-完整版本：批量上传 + 新手引导 + ChatGPT布局
+Underwriting Assistant - COMPLETE VERSION (FIXED)
+完整版本：批量上传 + 新手引导 + ChatGPT布局 + 修复StreamlitDuplicateElementKey错误
 
 所有功能：
 ✅ 新手引导（首次访问自动显示）
@@ -19,7 +19,7 @@ from typing import List, Dict, Any
 import requests
 import PyPDF2
 from docx import Document
-import base64  # 可留着
+import base64 
 
 # ============================================================================
 # CONFIGURATION
@@ -766,12 +766,14 @@ def render_chat_page(kb, conv_mgr):
         st.session_state.response_mode = "CoT" if "CoT" in response_mode else "Quick"
     
     # Display existing messages
-    for msg in current_conv["messages"]:
+    # FIX: Use enumerate to get a unique index for each message context
+    for i, msg in enumerate(current_conv["messages"]):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             # 如果这条 assistant 消息里带有引用文档，渲染可点击参考区
             if msg["role"] == "assistant" and "retrieved_docs" in msg:
-                render_clickable_references(msg["retrieved_docs"], kb)
+                # Pass unique context key based on message index
+                render_clickable_references(msg["retrieved_docs"], kb, context_key=f"msg_{i}")
     
     # Chat input
     if prompt := st.chat_input("Ask about underwriting cases...", key="chat_input_field"):
@@ -802,7 +804,8 @@ def render_chat_page(kb, conv_mgr):
                 st.markdown(resp)
                 
                 if retrieved:
-                    render_clickable_references(retrieved, kb)
+                    # Pass "new_gen" as context key for the immediate response
+                    render_clickable_references(retrieved, kb, context_key="new_gen")
         
         # 保存 assistant 消息，并把引用到的文档 ID 一起写入会话
         conv_mgr.add_message(
@@ -815,7 +818,7 @@ def render_chat_page(kb, conv_mgr):
         
         st.rerun()
 
-def render_clickable_references(doc_ids_or_docs, kb):
+def render_clickable_references(doc_ids_or_docs, kb, context_key="default"):
     """在聊天里渲染可点击的文档引用区，并支持跳转到知识库页"""
 
     if not doc_ids_or_docs:
@@ -870,9 +873,10 @@ def render_clickable_references(doc_ids_or_docs, kb):
                 st.info(summary)
             
             # 跳转到 KB，并指定要展开的 doc_id
+            # FIX: Use context_key to ensure button key uniqueness
             if st.button(
                 "🔗 View in Knowledge Base",
-                key=f"jump_kb_{doc['doc_id']}_{i}",
+                key=f"jump_kb_{context_key}_{doc['doc_id']}_{i}",
                 use_container_width=True
             ):
                 st.session_state.current_page = "kb"
