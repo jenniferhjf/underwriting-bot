@@ -1,12 +1,12 @@
 """
 Enhanced Underwriting Assistant - Professional RAG+CoT System
-Version 2.2 - Filename-based Tagging + Handwriting Classification
+Version 2.3 - Claude API Integration (English Only)
 
-New Features:
-- Automatic tagging based on first word of filename
-- Handwriting annotation classification: 结论/待办/风险点/对外口径
-- Improved OCR text extraction and categorization
-- Better visualization of classified annotations
+Features:
+- Claude 3.5 Sonnet API
+- Filename-based automatic tagging
+- Handwriting classification: Conclusion/Todo/Risk/Communication
+- Initial dataset: Hull - Marco Polo_Memo.pdf
 """
 
 import streamlit as st
@@ -18,7 +18,6 @@ from typing import List, Dict, Any, Tuple, Optional
 import requests
 import PyPDF2
 from docx import Document as DocxDocument
-import base64
 import pandas as pd
 from PIL import Image
 import io
@@ -29,12 +28,12 @@ from collections import defaultdict
 import traceback
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION - CLAUDE API
 # ============================================================================
 
-DEEPSEEK_API_KEY = "sk-99bba2ce117444e197270f17d303e74f"
-DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-chat"
+CLAUDE_API_KEY = "sk-yNCM9ClUBDJFsgZ0rktNPkGBTymQWL2rtyag5Rov3buMxRHt"
+CLAUDE_API_BASE = "https://api.anthropic.com/v1"
+CLAUDE_MODEL = "claude-3-5-sonnet-20241022"
 
 DATA_DIR = "data"
 WORKSPACES_DIR = os.path.join(DATA_DIR, "workspaces")
@@ -42,140 +41,111 @@ EMBEDDINGS_DIR = os.path.join(DATA_DIR, "embeddings")
 ANALYSIS_DIR = os.path.join(DATA_DIR, "analysis")
 REVIEW_DIR = os.path.join(DATA_DIR, "review_queue")
 AUDIT_DIR = os.path.join(DATA_DIR, "audit_logs")
+INITIAL_DATASET_DIR = "."  # Root directory for initial dataset
 
 for dir_path in [WORKSPACES_DIR, EMBEDDINGS_DIR, ANALYSIS_DIR, REVIEW_DIR, AUDIT_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 SUPPORTED_FORMATS = {
-    "pdf": "📄 PDF", "docx": "📝 Word", "doc": "📝 Word",
-    "txt": "📃 Text", "xlsx": "📊 Excel", "xls": "📊 Excel",
-    "png": "🖼️ Image", "jpg": "🖼️ Image", "jpeg": "🖼️ Image"
+    "pdf": "PDF", "docx": "Word", "doc": "Word",
+    "txt": "Text", "xlsx": "Excel", "xls": "Excel",
+    "png": "Image", "jpg": "Image", "jpeg": "Image"
 }
 
 TAG_OPTIONS = {
     "equipment": ["Gas Turbine", "Steam Turbine", "Boiler", "Generator", "Compressor", 
-                  "Heat Exchanger", "Pump", "Transformer", "Motor", "Vessel", "Other"],
+                  "Heat Exchanger", "Pump", "Transformer", "Motor", "Vessel", "Hull", "Other"],
     "industry": ["Oil & Gas", "Power Generation", "Manufacturing", "Chemical", 
                  "Mining", "Refining", "Marine", "Aviation", "Cargo", "Property", "Liability", "Other"],
     "timeline": ["2026-Q1", "2025-Q4", "2025-Q3", "2025-Q2", "2025-Q1", "2024", "2023", "Earlier"]
 }
 
-# 手写批注分类
 HANDWRITING_CATEGORIES = {
-    "conclusion": "结论",      # 最终决策、批准意见
-    "todo": "待办",            # 需要跟进的事项
-    "risk": "风险点",          # 识别的风险因素
-    "communication": "对外口径"  # 与客户/经纪人的沟通要点
+    "conclusion": "Conclusion",
+    "todo": "To-Do",
+    "risk": "Risk Factor",
+    "communication": "External Communication"
 }
 
-# Insurance domain terminology dictionary
 INSURANCE_TERMS = {
-    "retention": "自留额/免赔额",
-    "premium": "保费",
-    "coverage": "承保范围",
-    "deductible": "免赔额",
-    "underwriting slip": "承保单",
-    "loss ratio": "赔付率",
-    "exposure": "风险暴露",
-    "claims": "理赔",
-    "policy": "保单",
-    "endorsement": "批单",
-    "exclusion": "除外责任",
-    "limit": "责任限额",
-    "aggregate": "累计限额",
-    "per occurrence": "每次事故",
-    "retroactive date": "追溯日期"
+    "retention": "deductible/self-insured retention",
+    "premium": "insurance premium",
+    "coverage": "insurance coverage",
+    "deductible": "amount paid before insurance kicks in",
+    "underwriting slip": "underwriting document",
+    "loss ratio": "claims to premium ratio",
+    "exposure": "risk exposure",
+    "claims": "insurance claims",
+    "policy": "insurance policy",
+    "endorsement": "policy amendment",
+    "exclusion": "coverage exclusion",
+    "limit": "coverage limit",
+    "aggregate": "total coverage limit",
+    "per occurrence": "per incident limit",
+    "retroactive date": "coverage start date"
 }
 
 # ============================================================================
-# FILENAME-BASED TAGGING
+# CLAUDE API INTEGRATION
 # ============================================================================
 
-def extract_tag_from_filename(filename: str) -> str:
+def call_claude_api(system_prompt: str, user_prompt: str, temperature: float = 0.7, max_tokens: int = 2000) -> str:
     """
-    提取文件名第一个单词作为主要tag
+    Call Claude API with system and user prompts
     
-    Examples:
-    - "Vessel_Insurance_2024.pdf" -> "Vessel"
-    - "Turbine Maintenance Report.docx" -> "Turbine"
-    - "2024-Marine-Policy.pdf" -> "Marine" (跳过年份)
+    Args:
+        system_prompt: System instruction for Claude
+        user_prompt: User's actual query/request
+        temperature: Randomness (0.0-1.0)
+        max_tokens: Maximum response length
+    
+    Returns:
+        Claude's response text
     """
-    # 移除扩展名
-    name_without_ext = os.path.splitext(filename)[0]
-    
-    # 分割文件名 (支持多种分隔符)
-    tokens = re.split(r'[-_\s]+', name_without_ext)
-    
-    # 过滤掉空字符串和纯数字/日期
-    valid_tokens = []
-    for token in tokens:
-        token = token.strip()
-        # 跳过空字符串
-        if not token:
-            continue
-        # 跳过纯数字 (如 2024, 20240101)
-        if token.isdigit():
-            continue
-        # 跳过日期格式 (如 2024Q1)
-        if re.match(r'^\d{4}[Qq]\d$', token):
-            continue
-        valid_tokens.append(token)
-    
-    # 返回第一个有效token,转为Title Case
-    if valid_tokens:
-        return valid_tokens[0].capitalize()
-    else:
-        return "Document"
-
-def auto_generate_tags(filename: str, text_preview: str = "") -> Dict[str, List[str]]:
-    """
-    基于文件名和文本内容自动生成tags
-    
-    优先使用文件名第一个单词作为equipment tag
-    """
-    tags = {
-        "equipment": [],
-        "industry": [],
-        "timeline": []
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01"
     }
     
-    # 主tag来自文件名
-    main_tag = extract_tag_from_filename(filename)
-    tags["equipment"].append(main_tag)
+    payload = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system_prompt,
+        "messages": [
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+    }
     
-    # 从文本中提取行业信息
-    text_lower = text_preview.lower()
-    for industry in TAG_OPTIONS["industry"]:
-        if industry.lower() in text_lower:
-            if industry not in tags["industry"]:
-                tags["industry"].append(industry)
-    
-    # 如果没有找到行业,默认Other
-    if not tags["industry"]:
-        tags["industry"].append("Other")
-    
-    # 提取时间线
-    current_year = 2026
-    for year in range(current_year, current_year - 5, -1):
-        if str(year) in filename or str(year) in text_preview:
-            # 尝试找到季度
-            quarter_match = re.search(rf'{year}[-_\s]*[Qq]?([1-4])', filename + text_preview)
-            if quarter_match:
-                tags["timeline"].append(f"{year}-Q{quarter_match.group(1)}")
-            else:
-                tags["timeline"].append(str(year))
-            break
-    
-    if not tags["timeline"]:
-        tags["timeline"].append("Earlier")
-    
-    return tags
+    try:
+        resp = requests.post(
+            f"{CLAUDE_API_BASE}/messages",
+            headers=headers,
+            json=payload,
+            timeout=90
+        )
+        resp.raise_for_status()
+        response_data = resp.json()
+        
+        if "content" in response_data and len(response_data["content"]) > 0:
+            return response_data["content"][0]["text"]
+        else:
+            return "Error: No response from Claude"
+            
+    except requests.exceptions.RequestException as e:
+        return f"API Error: {str(e)}"
+    except Exception as e:
+        return f"Unexpected Error: {str(e)}"
 
 # ============================================================================
-# SYSTEM PROMPTS - UPDATED FOR CLASSIFICATION
+# SYSTEM PROMPTS
 # ============================================================================
 
-SYSTEM_INSTRUCTION = """Role: You are Mr. X's AI underwriting assistant with deep insurance domain knowledge
+SYSTEM_INSTRUCTION = """Role: You are an AI underwriting assistant with deep insurance domain knowledge
 
 Task: Answer underwriting queries using retrieved cases with insurance-specific understanding
 
@@ -195,7 +165,7 @@ Focus on:
 1. Policy schedules and coverage tables
 2. Premium calculations and retention amounts
 3. Loss statistics and claim history
-4. Coverage terms and conditions (A1, A2, etc.)
+4. Coverage terms and conditions
 5. Insured values and limits
 6. Effective dates and policy periods
 7. Named insureds and beneficiaries
@@ -234,19 +204,19 @@ HANDWRITTEN_CLASSIFICATION_SYSTEM = """You are analyzing and CLASSIFYING HANDWRI
 
 Your task: Extract handwritten text and classify into 4 categories:
 
-1. **结论 (Conclusion)** - Final decisions, approvals, authorizations
+1. **Conclusion** - Final decisions, approvals, authorizations
    Keywords: "approved", "declined", "accepted", "agreed", "confirmed", "OK", checkmarks, signatures
    Examples: "Approved subject to...", "Agree with terms", "OK to proceed"
 
-2. **待办 (To-Do)** - Action items, follow-ups, pending tasks
+2. **To-Do** - Action items, follow-ups, pending tasks
    Keywords: "need to", "follow up", "check", "verify", "confirm", "pending", "ask"
    Examples: "Need to verify loss history", "Follow up with broker", "Check references"
 
-3. **风险点 (Risk Factors)** - Identified risks, concerns, warnings
+3. **Risk Factor** - Identified risks, concerns, warnings
    Keywords: "risk", "concern", "warning", "high", "caution", "watch", "monitor", "flag"
    Examples: "High risk - monitor closely", "Concern about claims history", "Watch exposure"
 
-4. **对外口径 (External Communication)** - Messages for clients/brokers, negotiation points
+4. **External Communication** - Messages for clients/brokers, negotiation points
    Keywords: "tell broker", "inform client", "communicate", "proposal", "offer", "counter"
    Examples: "Tell broker we can offer...", "Communicate terms to client", "Counter with..."
 
@@ -254,13 +224,13 @@ For each handwritten annotation, provide:
 {
   "annotations": [
     {
-      "text": "原始手写内容 (OCR识别的文字)",
+      "text": "OCR recognized handwritten text",
       "category": "conclusion|todo|risk|communication",
       "confidence": 0.0-1.0,
       "location": "Page X, margin/top/bottom",
-      "context": "相关的打印内容上下文",
+      "context": "related printed content context",
       "urgency": "high|medium|low",
-      "assignee": "识别到的责任人 (如果有)"
+      "assignee": "identified responsible person (if any)"
     }
   ],
   "summary_by_category": {
@@ -284,18 +254,18 @@ QA_EXTRACTION_SYSTEM = """You are extracting Question-Answer pairs from insuranc
 
 Recognize patterns:
 1. Formal Q&A format:
-   - "A1 Question: ..." → "Answer: ..."
-   - "Q1: ..." → "A1: ..."
+   - "Q1: ..." -> "A1: ..."
+   - "Question: ..." -> "Answer: ..."
 2. Email correspondence:
-   - "From: [Broker] Q: ..." → "From: [Underwriter] Re: ..."
+   - "From: [Broker] Q: ..." -> "From: [Underwriter] Re: ..."
 3. Margin annotations:
-   - Question mark next to clause → Handwritten answer
+   - Question mark next to clause -> Handwritten answer
 4. Meeting notes:
-   - "CE asked: ..." → "Response: ..."
+   - "CE asked: ..." -> "Response: ..."
 
 For each Q&A pair extract:
 {
-  "question_id": "A1/Q1/Email-001",
+  "question_id": "Q1/Email-001",
   "question_text": "...",
   "answer_text": "...",
   "source_type": "formal/email/annotation/verbal",
@@ -312,7 +282,7 @@ Return array of Q&A objects."""
 AUTO_ANNOTATE_SYSTEM = """You are an insurance underwriting document auto-tagger with domain expertise.
 
 Analyze the document and extract:
-1. Insurance type (Cargo/Property/Liability/Equipment Breakdown/etc.)
+1. Insurance type (Cargo/Property/Liability/Equipment Breakdown/Marine Hull/etc.)
 2. Equipment/Asset types covered
 3. Industry sector
 4. Key financial terms
@@ -326,7 +296,7 @@ Return STRICT JSON:
     "industry": ["..."],
     "timeline": ["YYYY-QX"]
   },
-  "insurance_type": "Cargo|Property|Liability|Equipment|Marine|Other",
+  "insurance_type": "Cargo|Property|Liability|Equipment|Marine|Hull|Other",
   "decision": "Approved|Declined|Conditional|Pending",
   "premium": 0,
   "retention": 0,
@@ -335,7 +305,7 @@ Return STRICT JSON:
   "risk_level": "Low|Medium|Medium-High|High|Critical",
   "case_summary": "Brief summary focusing on coverage, insured, and key terms",
   "key_insights": "Notable risk factors, loss history, special conditions",
-  "extracted_clauses": ["A1", "A2", ...],
+  "extracted_clauses": [],
   "confidence_score": 0.0-1.0
 }
 
@@ -369,19 +339,8 @@ def log_audit_event(workspace_name: str, event_type: str, details: Dict[str, Any
         print(f"Audit logging failed: {e}")
 
 # ============================================================================
-# API & UTILITY FUNCTIONS
+# UTILITY FUNCTIONS
 # ============================================================================
-
-def call_deepseek_api(messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 2000) -> str:
-    """Call DeepSeek API with error handling"""
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
-    payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-    try:
-        resp = requests.post(f"{DEEPSEEK_API_BASE}/chat/completions", headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"❌ API Error: {str(e)}"
 
 def preprocess_insurance_text(text: str) -> str:
     """Preprocess text with insurance domain knowledge"""
@@ -465,6 +424,74 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     return dot / (m1 * m2) if m1 and m2 else 0.0
 
 # ============================================================================
+# FILENAME-BASED TAGGING
+# ============================================================================
+
+def extract_tag_from_filename(filename: str) -> str:
+    """
+    Extract first word from filename as main tag
+    
+    Examples:
+    - "Vessel_Insurance_2024.pdf" -> "Vessel"
+    - "Hull - Marco Polo_Memo.pdf" -> "Hull"
+    - "Turbine Maintenance Report.docx" -> "Turbine"
+    - "2024-Marine-Policy.pdf" -> "Marine" (skip year)
+    """
+    name_without_ext = os.path.splitext(filename)[0]
+    tokens = re.split(r'[-_\s]+', name_without_ext)
+    
+    valid_tokens = []
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            continue
+        if re.match(r'^\d{4}[Qq]\d$', token):
+            continue
+        valid_tokens.append(token)
+    
+    if valid_tokens:
+        return valid_tokens[0].capitalize()
+    else:
+        return "Document"
+
+def auto_generate_tags(filename: str, text_preview: str = "") -> Dict[str, List[str]]:
+    """Generate tags based on filename and text content"""
+    tags = {
+        "equipment": [],
+        "industry": [],
+        "timeline": []
+    }
+    
+    main_tag = extract_tag_from_filename(filename)
+    tags["equipment"].append(main_tag)
+    
+    text_lower = text_preview.lower()
+    for industry in TAG_OPTIONS["industry"]:
+        if industry.lower() in text_lower:
+            if industry not in tags["industry"]:
+                tags["industry"].append(industry)
+    
+    if not tags["industry"]:
+        tags["industry"].append("Other")
+    
+    current_year = 2026
+    for year in range(current_year, current_year - 5, -1):
+        if str(year) in filename or str(year) in text_preview:
+            quarter_match = re.search(rf'{year}[-_\s]*[Qq]?([1-4])', filename + text_preview)
+            if quarter_match:
+                tags["timeline"].append(f"{year}-Q{quarter_match.group(1)}")
+            else:
+                tags["timeline"].append(str(year))
+            break
+    
+    if not tags["timeline"]:
+        tags["timeline"].append("Earlier")
+    
+    return tags
+
+# ============================================================================
 # IMAGE & HANDWRITING PROCESSING
 # ============================================================================
 
@@ -516,25 +543,23 @@ def classify_handwriting_quality(image_info: Dict) -> Tuple[str, float]:
         return "CURSIVE", 0.30
 
 # ============================================================================
-# Q&A EXTRACTION
+# ANALYSIS FUNCTIONS (Using Claude)
 # ============================================================================
 
 def extract_qa_pairs(text: str, filename: str) -> List[Dict[str, Any]]:
-    """Extract Question-Answer pairs using pattern matching and LLM"""
+    """Extract Question-Answer pairs using Claude"""
     
-    prompt = f"""Document: {filename}
+    user_prompt = f"""Document: {filename}
 
 Text content:
 {text[:5000]}
 
-Extract all Question-Answer pairs following the QA_EXTRACTION_SYSTEM guidelines.
+Extract all Question-Answer pairs following the guidelines.
 Return ONLY a valid JSON array of Q&A objects."""
     
-    response = call_deepseek_api(
-        messages=[
-            {"role": "system", "content": QA_EXTRACTION_SYSTEM},
-            {"role": "user", "content": prompt}
-        ],
+    response = call_claude_api(
+        system_prompt=QA_EXTRACTION_SYSTEM,
+        user_prompt=user_prompt,
         temperature=0.2,
         max_tokens=2000
     )
@@ -556,14 +581,10 @@ Return ONLY a valid JSON array of Q&A objects."""
     except:
         return []
 
-# ============================================================================
-# ENHANCED ANALYSIS FUNCTIONS WITH CLASSIFICATION
-# ============================================================================
-
 def analyze_electronic_text(extracted_text: str, filename: str) -> Dict[str, Any]:
-    """Analyze electronic/printed text with insurance focus"""
+    """Analyze electronic/printed text using Claude"""
     
-    prompt = f"""Document: {filename}
+    user_prompt = f"""Document: {filename}
 
 Electronic Printed Text Content:
 {extracted_text[:5000]}
@@ -573,11 +594,9 @@ Focus on policy terms, financial figures, coverage details, and formal terms.
 
 Return ONLY valid JSON."""
     
-    response = call_deepseek_api(
-        messages=[
-            {"role": "system", "content": ELECTRONIC_TEXT_ANALYSIS_SYSTEM},
-            {"role": "user", "content": prompt}
-        ],
+    response = call_claude_api(
+        system_prompt=ELECTRONIC_TEXT_ANALYSIS_SYSTEM,
+        user_prompt=user_prompt,
         temperature=0.2,
         max_tokens=2000
     )
@@ -601,10 +620,7 @@ Return ONLY valid JSON."""
         }
 
 def analyze_and_classify_handwriting(image_info: List[Dict], extracted_text: str, doc_id: str) -> Dict[str, Any]:
-    """
-    Analyze handwritten annotations and classify into categories:
-    结论/待办/风险点/对外口径
-    """
+    """Analyze and classify handwritten annotations using Claude"""
     
     handwriting_items = []
     needs_review = []
@@ -641,8 +657,7 @@ def analyze_and_classify_handwriting(image_info: List[Dict], extracted_text: str
         with open(review_file, 'w', encoding='utf-8') as f:
             json.dump(needs_review, f, ensure_ascii=False, indent=2)
     
-    # LLM analysis with classification
-    prompt = f"""Based on document analysis with handwriting regions detected:
+    user_prompt = f"""Based on document analysis with handwriting regions detected:
 
 CONTEXT FROM PRINTED TEXT:
 {extracted_text[:2500]}
@@ -650,10 +665,10 @@ CONTEXT FROM PRINTED TEXT:
 HANDWRITING REGIONS DETECTED: {len(handwriting_items)}
 
 YOUR TASK: Extract and CLASSIFY all handwritten annotations into these categories:
-1. 结论 (Conclusion) - Final decisions, approvals
-2. 待办 (To-Do) - Action items, follow-ups
-3. 风险点 (Risk Factors) - Identified risks, concerns
-4. 对外口径 (External Communication) - Messages for clients/brokers
+1. Conclusion - Final decisions, approvals
+2. To-Do - Action items, follow-ups
+3. Risk Factor - Identified risks, concerns
+4. External Communication - Messages for clients/brokers
 
 For each annotation:
 - Extract the handwritten text (even if low confidence)
@@ -662,13 +677,11 @@ For each annotation:
 - Note confidence level
 - Flag if needs human review
 
-Return the JSON structure specified in HANDWRITTEN_CLASSIFICATION_SYSTEM."""
+Return the JSON structure as specified."""
     
-    response = call_deepseek_api(
-        messages=[
-            {"role": "system", "content": HANDWRITTEN_CLASSIFICATION_SYSTEM},
-            {"role": "user", "content": prompt}
-        ],
+    response = call_claude_api(
+        system_prompt=HANDWRITTEN_CLASSIFICATION_SYSTEM,
+        user_prompt=user_prompt,
         temperature=0.3,
         max_tokens=2500
     )
@@ -701,7 +714,7 @@ Return the JSON structure specified in HANDWRITTEN_CLASSIFICATION_SYSTEM."""
     return result
 
 def perform_dual_track_analysis(file_path: str, file_format: str, filename: str, doc_id: str, workspace_name: str) -> Dict[str, Any]:
-    """Perform enhanced DUAL-TRACK analysis with classification"""
+    """Perform enhanced DUAL-TRACK analysis using Claude"""
     
     analysis_result = {
         "doc_id": doc_id,
@@ -726,8 +739,7 @@ def perform_dual_track_analysis(file_path: str, file_format: str, filename: str,
             "file_format": file_format
         })
         
-        # TRACK 1: Electronic Text
-        st.info("📝 Track 1: Analyzing Electronic/Printed Text...")
+        st.info("Track 1: Analyzing Electronic/Printed Text...")
         extracted_text = extract_text_from_file(file_path, file_format)
         analysis_result["metadata"]["text_length"] = len(extracted_text)
         analysis_result["metadata"]["has_text"] = len(extracted_text) > 0
@@ -736,13 +748,12 @@ def perform_dual_track_analysis(file_path: str, file_format: str, filename: str,
             electronic_analysis = analyze_electronic_text(extracted_text, filename)
             analysis_result["dual_track_analysis"]["electronic_text"] = electronic_analysis
             
-            st.info("❓ Extracting Question-Answer pairs...")
+            st.info("Extracting Question-Answer pairs...")
             qa_pairs = extract_qa_pairs(extracted_text, filename)
             analysis_result["dual_track_analysis"]["qa_pairs"] = qa_pairs
             analysis_result["metadata"]["qa_pairs_count"] = len(qa_pairs)
         
-        # TRACK 2: Handwritten Content with Classification
-        st.info("✍️ Track 2: Processing & Classifying Handwritten Content...")
+        st.info("Track 2: Processing & Classifying Handwritten Content...")
         images_info = []
         temp_image_dir = tempfile.mkdtemp(prefix=f"doc_analysis_{doc_id}_")
         
@@ -769,7 +780,6 @@ def perform_dual_track_analysis(file_path: str, file_format: str, filename: str,
             analysis_result["dual_track_analysis"]["handwritten_annotations"] = handwriting_analysis
             analysis_result["metadata"]["review_queue_count"] = handwriting_analysis.get("review_queue_count", 0)
             
-            # Count by category
             annotations = handwriting_analysis.get("annotations", [])
             category_count = {
                 "conclusion": 0,
@@ -788,10 +798,8 @@ def perform_dual_track_analysis(file_path: str, file_format: str, filename: str,
                 with open(review_file, 'r', encoding='utf-8') as f:
                     analysis_result["review_queue"] = json.load(f)
         
-        # INTEGRATION
-        st.info("🔗 Integrating Analysis Results...")
+        st.info("Integrating Analysis Results...")
         
-        # Extract summaries by category
         handwriting_summary = analysis_result["dual_track_analysis"]["handwritten_annotations"].get("summary_by_category", {})
         
         integration_prompt = f"""Integrate these analysis tracks into a comprehensive underwriting report:
@@ -800,10 +808,10 @@ ELECTRONIC TEXT ANALYSIS:
 {json.dumps(analysis_result["dual_track_analysis"]["electronic_text"], indent=2, ensure_ascii=False)[:2000]}
 
 HANDWRITTEN ANNOTATIONS (CLASSIFIED):
-结论 (Conclusions): {len(handwriting_summary.get('conclusion', []))} items
-待办 (To-Do): {len(handwriting_summary.get('todo', []))} items
-风险点 (Risks): {len(handwriting_summary.get('risk', []))} items
-对外口径 (Communications): {len(handwriting_summary.get('communication', []))} items
+Conclusions: {len(handwriting_summary.get('conclusion', []))} items
+To-Do: {len(handwriting_summary.get('todo', []))} items
+Risks: {len(handwriting_summary.get('risk', []))} items
+Communications: {len(handwriting_summary.get('communication', []))} items
 
 Details:
 {json.dumps(handwriting_summary, indent=2, ensure_ascii=False)[:1500]}
@@ -811,28 +819,25 @@ Details:
 Q&A PAIRS: {len(analysis_result["dual_track_analysis"]["qa_pairs"])}
 
 Create a structured report with:
-1. **Executive Summary** - Key decisions and conclusions from handwritten notes
-2. **Action Items** - All to-do items with urgency
-3. **Risk Assessment** - Identified risk factors from annotations
-4. **External Communication Plan** - Points to communicate to clients/brokers
-5. **Policy Details** - From electronic text
-6. **Q&A Summary** - Key questions and answers
-7. **Recommendations** - Next steps for underwriter
+1. Executive Summary - Key decisions and conclusions
+2. Action Items - All to-do items with urgency
+3. Risk Assessment - Identified risk factors
+4. External Communication Plan - Client/broker communication points
+5. Policy Details - From electronic text
+6. Q&A Summary - Key questions and answers
+7. Recommendations - Next steps for underwriter
 
 Format as clear markdown with sections."""
         
-        integration_summary = call_deepseek_api(
-            messages=[
-                {"role": "system", "content": "You are a senior insurance underwriting analyst creating structured reports."},
-                {"role": "user", "content": integration_prompt}
-            ],
+        integration_summary = call_claude_api(
+            system_prompt="You are a senior insurance underwriting analyst creating structured reports.",
+            user_prompt=integration_prompt,
             temperature=0.4,
             max_tokens=3000
         )
         
         analysis_result["dual_track_analysis"]["integration_summary"] = integration_summary
         
-        # Save analysis
         analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_dual_analysis.json")
         with open(analysis_file, 'w', encoding='utf-8') as f:
             json.dump(analysis_result, f, ensure_ascii=False, indent=2)
@@ -846,15 +851,15 @@ Format as clear markdown with sections."""
             "annotation_categories": analysis_result["metadata"].get("annotation_categories", {})
         })
         
-        st.success("✅ Dual-track analysis completed!")
+        st.success("Dual-track analysis completed!")
         
         if analysis_result["metadata"].get("review_queue_count", 0) > 0:
-            st.warning(f"⚠️ {analysis_result['metadata']['review_queue_count']} handwritten items need human review.")
+            st.warning(f"{analysis_result['metadata']['review_queue_count']} handwritten items need human review.")
         
         return analysis_result
         
     except Exception as e:
-        st.error(f"❌ Analysis failed: {str(e)}")
+        st.error(f"Analysis failed: {str(e)}")
         st.error(traceback.format_exc())
         log_audit_event(workspace_name, "analysis_failed", {
             "doc_id": doc_id,
@@ -864,13 +869,12 @@ Format as clear markdown with sections."""
         return analysis_result
 
 def auto_annotate_by_llm(extracted_text: str, filename: str) -> Dict[str, Any]:
-    """Auto-annotate document using insurance-aware LLM"""
+    """Auto-annotate document using Claude"""
     user_prompt = f"FILENAME: {filename}\n\nTEXT:\n{(extracted_text or '')[:5000]}"
-    content = call_deepseek_api(
-        messages=[
-            {"role": "system", "content": AUTO_ANNOTATE_SYSTEM},
-            {"role": "user", "content": user_prompt}
-        ],
+    
+    content = call_claude_api(
+        system_prompt=AUTO_ANNOTATE_SYSTEM,
+        user_prompt=user_prompt,
         temperature=0.2,
         max_tokens=1000
     )
@@ -1128,6 +1132,74 @@ def create_workspace(name: str) -> Workspace:
     return ws
 
 # ============================================================================
+# INITIAL DATASET LOADER
+# ============================================================================
+
+def load_initial_dataset(workspace: Workspace):
+    """Load Hull - Marco Polo_Memo.pdf as initial dataset if workspace is empty"""
+    if len(workspace.metadata) > 0:
+        return None
+    
+    initial_file_path = os.path.join(INITIAL_DATASET_DIR, "Hull - Marco Polo_Memo.pdf")
+    
+    if not os.path.exists(initial_file_path):
+        return None
+    
+    try:
+        # Extract text
+        extracted_text = extract_text_from_pdf(initial_file_path)
+        
+        # Generate tags from filename
+        auto_tags = auto_generate_tags("Hull - Marco Polo_Memo.pdf", extracted_text[:1000])
+        
+        # Auto-annotate
+        auto_annotation = auto_annotate_by_llm(extracted_text, "Hull - Marco Polo_Memo.pdf")
+        
+        # Merge tags
+        auto_annotation["tags"]["equipment"] = auto_tags["equipment"] + [
+            t for t in auto_annotation["tags"].get("equipment", []) 
+            if t not in auto_tags["equipment"]
+        ]
+        auto_annotation["tags"]["industry"] = auto_tags["industry"]
+        auto_annotation["tags"]["timeline"] = auto_tags["timeline"]
+        
+        # Create uploaded file object
+        class InitialFileWrapper:
+            def __init__(self, path, name):
+                self.path = path
+                self.name = name
+                with open(path, 'rb') as f:
+                    self.content = f.read()
+                self.size = len(self.content)
+            
+            def getbuffer(self):
+                return self.content
+        
+        uploaded_file = InitialFileWrapper(initial_file_path, "Hull - Marco Polo_Memo.pdf")
+        
+        # Add to workspace
+        doc = workspace.add_document(
+            uploaded_file=uploaded_file,
+            tags=auto_annotation["tags"],
+            case_summary=auto_annotation["case_summary"],
+            key_insights=auto_annotation["key_insights"],
+            decision=auto_annotation["decision"],
+            premium=int(auto_annotation.get("premium", 0) or 0),
+            risk_level=auto_annotation["risk_level"],
+            extracted_text_preview=extracted_text[:1000],
+            has_deep_analysis=False,
+            insurance_type=auto_annotation.get("insurance_type", "Hull"),
+            retention=int(auto_annotation.get("retention", 0) or 0),
+            limit=int(auto_annotation.get("limit", 0) or 0)
+        )
+        
+        return doc
+        
+    except Exception as e:
+        st.error(f"Failed to load initial dataset: {e}")
+        return None
+
+# ============================================================================
 # REVIEW WORKBENCH FUNCTIONS
 # ============================================================================
 
@@ -1199,9 +1271,11 @@ def submit_handwriting_review(doc_id: str, image_id: str,
 # ============================================================================
 
 def generate_cot_response(query: str, retrieved_docs: List[Dict[str, Any]]) -> str:
-    """Generate Chain-of-Thought response with insurance expertise"""
+    """Generate Chain-of-Thought response using Claude"""
     if not retrieved_docs:
-        return "⚠️ **No Relevant Cases Found**\n\nPlease add documents to this workspace or try refining your query with specific insurance terms (e.g., cargo, retention, loss ratio)."
+        return """**No Relevant Cases Found**
+
+Please add documents to this workspace or try refining your query with specific insurance terms (e.g., hull, cargo, retention, loss ratio)."""
     
     docs_text = ""
     for i, doc in enumerate(retrieved_docs, 1):
@@ -1216,7 +1290,7 @@ CASE #{i}: {doc["doc_id"]}
 {'='*70}
 File: {doc["filename"]} ({doc["file_format"].upper()})
 Type: {insurance_type}
-Tags: 🔧 {equipment} | 🏭 {industry} | 📅 {timeline}
+Tags: {equipment} | {industry} | {timeline}
 
 Decision: {doc["decision"]}
 Premium: ${doc["premium"]:,}
@@ -1234,14 +1308,12 @@ Key Insights:
 
 """
     
-    messages = [
-        {"role": "system", "content": SYSTEM_INSTRUCTION},
-        {"role": "user", "content": f"""Query: "{query}"
+    user_prompt = f"""Query: "{query}"
 
 Retrieved Cases:
 {docs_text}
 
-Please analyze using the 5-step insurance underwriting CoT framework:
+Please analyze using the 5-step insurance underwriting framework:
 1. Extract key insurance terms and risk factors from query
 2. Analyze retrieved precedents (focus on similar risks and recent cases)
 3. Check recency & applicability (prioritize 2025-2026 cases)
@@ -1254,93 +1326,91 @@ Provide:
 - **Retention Terms** (recommended deductible)
 - **Special Conditions** (if any)
 - **Source References** (case IDs and specific terms)
-"""}
-    ]
+"""
     
-    return call_deepseek_api(messages, temperature=0.6, max_tokens=2500)
+    return call_claude_api(
+        system_prompt=SYSTEM_INSTRUCTION,
+        user_prompt=user_prompt,
+        temperature=0.6,
+        max_tokens=2500
+    )
 
 # ============================================================================
-# UI STYLING
+# UI STYLING (FIXED - English Only)
 # ============================================================================
 
 def inject_css(appearance: str):
     """Enhanced CSS with category badges"""
-    base_css = """
+    if appearance == "Dark":
+        css = """
         <style>
         :root {
-            --text-primary: {text_primary};
-            --text-secondary: {text_secondary};
-            --muted: {muted};
-            --bg-app: {bg_app};
-            --card-bg: {card_bg};
-            --shadow: {shadow};
-            --brand: {brand};
-            --green: {green};
-            --amber: {amber};
-            --purple: {purple};
-            --red: {red};
-            --blue: {blue};
+            --text-primary: #e5e7eb; --text-secondary: #cbd5e1; --muted: #9ca3af;
+            --bg-app: #0b1220; --card-bg: #101826; --shadow: 0 1px 3px rgba(0,0,0,0.5);
+            --brand: #93c5fd; --green: #86efac; --amber: #fde68a; --purple: #c084fc;
+            --red: #fca5a5; --blue: #60a5fa;
         }
-        .stApp {{ background-color: var(--bg-app); color: var(--text-primary); }}
-        .main-header {{ font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }}
-        .sub-header {{ font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }}
-        .tag-badge {{ display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; }}
-        .tag-equipment {{ background-color: {tag_eq_bg}; color: {tag_eq_text}; }}
-        .tag-industry {{ background-color: {tag_ind_bg}; color: {tag_ind_text}; }}
-        .tag-timeline {{ background-color: {tag_time_bg}; color: {tag_time_text}; }}
-        .tag-insurance {{ background-color: {tag_ins_bg}; color: {tag_ins_text}; }}
+        .stApp { background-color: var(--bg-app); color: var(--text-primary); }
+        .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
+        .sub-header { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
+        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color:#0b1220; }
+        .tag-equipment { background-color: #93c5fd; }
+        .tag-industry { background-color: #86efac; }
+        .tag-timeline { background-color: #fde68a; }
+        .tag-insurance { background-color: #c084fc; }
         
-        /* Handwriting Category Badges */
-        .category-conclusion {{ background-color: #86efac; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }}
-        .category-todo {{ background-color: #fde68a; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }}
-        .category-risk {{ background-color: #fca5a5; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }}
-        .category-communication {{ background-color: #93c5fd; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }}
+        .category-conclusion { background-color: #86efac; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; }
+        .category-todo { background-color: #fde68a; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; }
+        .category-risk { background-color: #fca5a5; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; }
+        .category-communication { background-color: #93c5fd; color: #0b1220; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; }
         
-        .analysis-badge {{ background-color: {analysis_bg}; color: {analysis_text}; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }}
-        .review-pending {{ background-color: {review_pending_bg}; color: {review_pending_text}; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }}
-        .review-completed {{ background-color: {review_complete_bg}; color: {review_complete_text}; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }}
-        .confidence-clear {{ color: {conf_clear}; font-weight: 700; }}
-        .confidence-standard {{ color: {conf_standard}; font-weight: 700; }}
-        .confidence-cursive {{ color: {conf_cursive}; font-weight: 700; }}
-        .review-card {{ background: var(--card-bg); padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid {review_border}; margin: 1rem 0; {card_shadow} }}
-        .stChatMessage, .stMarkdown, p, li, label, span, div {{ color: var(--text-primary); }}
-        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{ color: var(--text-primary) !important; }}
-        #MainMenu, footer, header {{visibility: hidden;}}
+        .analysis-badge { background-color: #c084fc; color:#0b1220; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .review-pending { background-color: #fca5a5; color:#0b1220; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .review-completed { background-color: #86efac; color:#0b1220; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .confidence-clear { color: #86efac; font-weight: 700; }
+        .confidence-standard { color: #fde68a; font-weight: 700; }
+        .confidence-cursive { color: #fca5a5; font-weight: 700; }
+        .review-card { background: var(--card-bg); padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid #fca5a5; margin: 1rem 0; }
+        .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
+        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
+        #MainMenu, footer, header {visibility: hidden;}
         </style>
         """
-    
-    if appearance == "Dark":
-        css = base_css.format(
-            text_primary="#e5e7eb", text_secondary="#cbd5e1", muted="#9ca3af",
-            bg_app="#0b1220", card_bg="#101826", shadow="0 1px 3px rgba(0,0,0,0.5)",
-            brand="#93c5fd", green="#86efac", amber="#fde68a", purple="#c084fc",
-            red="#fca5a5", blue="#60a5fa",
-            tag_eq_bg="#93c5fd", tag_eq_text="#0b1220",
-            tag_ind_bg="#86efac", tag_ind_text="#0b1220",
-            tag_time_bg="#fde68a", tag_time_text="#0b1220",
-            tag_ins_bg="#c084fc", tag_ins_text="#0b1220",
-            analysis_bg="#c084fc", analysis_text="#0b1220",
-            review_pending_bg="#fca5a5", review_pending_text="#0b1220",
-            review_complete_bg="#86efac", review_complete_text="#0b1220",
-            conf_clear="#86efac", conf_standard="#fde68a", conf_cursive="#fca5a5",
-            review_border="#fca5a5", card_shadow=""
-        )
     else:
-        css = base_css.format(
-            text_primary="#0f172a", text_secondary="#374151", muted="#6b7280",
-            bg_app="#f5f7fa", card_bg="#ffffff", shadow="0 1px 3px rgba(0,0,0,0.1)",
-            brand="#1e40af", green="#166534", amber="#92400e", purple="#7c3aed",
-            red="#dc2626", blue="#2563eb",
-            tag_eq_bg="#dbeafe", tag_eq_text="#0f172a",
-            tag_ind_bg="#dcfce7", tag_ind_text="#0f172a",
-            tag_time_bg="#fef3c7", tag_time_text="#0f172a",
-            tag_ins_bg="#e9d5ff", tag_ins_text="#0f172a",
-            analysis_bg="#e9d5ff", analysis_text="#0f172a",
-            review_pending_bg="#fee2e2", review_pending_text="#dc2626",
-            review_complete_bg="#dcfce7", review_complete_text="#166534",
-            conf_clear="#166534", conf_standard="#92400e", conf_cursive="#dc2626",
-            review_border="#dc2626", card_shadow="box-shadow: 0 1px 3px rgba(0,0,0,0.1);"
-        )
+        css = """
+        <style>
+        :root {
+            --text-primary: #0f172a; --text-secondary: #374151; --muted: #6b7280;
+            --bg-app: #f5f7fa; --card-bg: #ffffff; --shadow: 0 1px 3px rgba(0,0,0,0.1);
+            --brand: #1e40af; --green: #166534; --amber: #92400e; --purple: #7c3aed;
+            --red: #dc2626; --blue: #2563eb;
+        }
+        .stApp { background-color: var(--bg-app); color: var(--text-primary); }
+        .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
+        .sub-header { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
+        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .tag-equipment { background-color: #dbeafe; color: #0f172a; }
+        .tag-industry { background-color: #dcfce7; color: #0f172a; }
+        .tag-timeline { background-color: #fef3c7; color: #0f172a; }
+        .tag-insurance { background-color: #e9d5ff; color: #0f172a; }
+        
+        .category-conclusion { background-color: #dcfce7; color: #166534; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; border: 2px solid #86efac; }
+        .category-todo { background-color: #fef3c7; color: #92400e; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; border: 2px solid #fde68a; }
+        .category-risk { background-color: #fee2e2; color: #dc2626; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; border: 2px solid #fca5a5; }
+        .category-communication { background-color: #dbeafe; color: #1e40af; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; display:inline-block; border: 2px solid #93c5fd; }
+        
+        .analysis-badge { background-color: #e9d5ff; color: #0f172a; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .review-pending { background-color: #fee2e2; color: #dc2626; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .review-completed { background-color: #dcfce7; color: #166534; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .confidence-clear { color: #166534; font-weight: 700; }
+        .confidence-standard { color: #92400e; font-weight: 700; }
+        .confidence-cursive { color: #dc2626; font-weight: 700; }
+        .review-card { background: var(--card-bg); padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid #dc2626; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
+        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
+        #MainMenu, footer, header {visibility: hidden;}
+        </style>
+        """
     
     st.markdown(css, unsafe_allow_html=True)
 
@@ -1351,7 +1421,7 @@ def inject_css(appearance: str):
 def main():
     st.set_page_config(
         page_title="Insurance Underwriting Assistant",
-        page_icon="🛡️",
+        page_icon="shield",
         layout="wide",
         initial_sidebar_state="expanded"
     )
@@ -1365,29 +1435,31 @@ def main():
         st.session_state.current_review_index = 0
     if "review_submitted" not in st.session_state:
         st.session_state.review_submitted = False
+    if "initial_dataset_loaded" not in st.session_state:
+        st.session_state.initial_dataset_loaded = False
     
     # Sidebar
     with st.sidebar:
-        st.markdown("### 🎨 Appearance")
+        st.markdown("### Appearance")
         appearance = st.radio("Theme", ["Light", "Dark"], horizontal=True, key="appearance_choice")
     
     inject_css(appearance)
     
     # Header
-    st.markdown('<div class="main-header">🛡️ Insurance Underwriting Assistant</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Filename-based Tagging | Handwriting Classification: 结论/待办/风险点/对外口径</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">Insurance Underwriting Assistant</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Claude 3.5 | Filename-based Tagging | Handwriting Classification: Conclusion/Todo/Risk/Communication</div>', unsafe_allow_html=True)
     
     # Workspace Management
     with st.sidebar:
-        st.markdown("### 📁 Workspaces")
+        st.markdown("### Workspaces")
         workspaces = get_all_workspaces()
         
-        with st.expander("➕ New Workspace"):
-            new_ws_name = st.text_input("Workspace Name", placeholder="e.g., Marine Cargo 2026")
+        with st.expander("New Workspace"):
+            new_ws_name = st.text_input("Workspace Name", placeholder="e.g., Marine Hull 2026")
             if st.button("Create", key="create_ws_btn"):
                 if new_ws_name and new_ws_name not in workspaces:
                     create_workspace(new_ws_name)
-                    st.success(f"✅ Created: {new_ws_name}")
+                    st.success(f"Created: {new_ws_name}")
                     st.rerun()
                 elif new_ws_name in workspaces:
                     st.error("Already exists")
@@ -1400,10 +1472,18 @@ def main():
         
         selected_ws = st.selectbox("Select Workspace", workspaces, key="workspace_selector")
         workspace = Workspace(selected_ws)
+        
+        # Load initial dataset on first run
+        if not st.session_state.initial_dataset_loaded:
+            initial_doc = load_initial_dataset(workspace)
+            if initial_doc:
+                st.success("Loaded initial dataset: Hull - Marco Polo_Memo.pdf")
+            st.session_state.initial_dataset_loaded = True
+        
         stats = workspace.get_stats()
         
         st.markdown("---")
-        st.markdown("### 📊 Stats")
+        st.markdown("### Stats")
         c1, c2 = st.columns(2)
         with c1:
             st.metric("Docs", stats["total_documents"])
@@ -1417,12 +1497,12 @@ def main():
             st.metric("Reviews", stats.get('pending_reviews', 0))
         
         if stats.get("insurance_type_distribution"):
-            with st.expander("📋 Types"):
+            with st.expander("Types"):
                 for itype, count in stats["insurance_type_distribution"].items():
                     st.write(f"• {itype}: {count}")
         
         st.markdown("---")
-        if st.button("🗑️ Delete Workspace", key="delete_ws"):
+        if st.button("Delete Workspace", key="delete_ws"):
             if st.checkbox(f"Confirm delete", key="confirm_del"):
                 import shutil
                 shutil.rmtree(workspace.workspace_dir)
@@ -1430,22 +1510,22 @@ def main():
                 st.rerun()
     
     # Main Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "💬 Chat",
-        "📄 Documents",
-        "📤 Upload",
-        "🔬 Analysis",
-        "👥 Review"
+    tabs = st.tabs([
+        "Chat",
+        "Documents",
+        "Upload",
+        "Analysis",
+        "Review"
     ])
     
     # TAB 1: Chat
-    with tab1:
-        st.markdown("### 💬 Chat")
+    with tabs[0]:
+        st.markdown("### Chat")
         
         if stats["total_documents"] == 0:
-            st.warning("⚠️ No documents yet.")
+            st.warning("No documents yet.")
         
-        with st.expander("🔍 Filters"):
+        with st.expander("Filters"):
             col1, col2, col3 = st.columns(3)
             with col1:
                 ins_types = ["All"] + list(set(d.get("insurance_type", "Other") for d in workspace.metadata))
@@ -1462,13 +1542,13 @@ def main():
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
         
-        if prompt := st.chat_input("Ask..."):
+        if prompt := st.chat_input("Ask about underwriting cases..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
             
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching..."):
+                with st.spinner("Searching knowledge base..."):
                     filters = {}
                     if filter_ins != "All":
                         filters["insurance_type"] = filter_ins
@@ -1482,10 +1562,10 @@ def main():
                     st.markdown(resp)
                     
                     if retrieved:
-                        with st.expander(f"📚 {len(retrieved)} Cases"):
+                        with st.expander(f"{len(retrieved)} Retrieved Cases"):
                             for d in retrieved:
                                 st.markdown(f"**{d['doc_id']}** - {d['filename']}")
-                                tags_html = f'<span class="tag-insurance">📋 {d.get("insurance_type", "Other")}</span>'
+                                tags_html = f'<span class="tag-insurance">{d.get("insurance_type", "Other")}</span>'
                                 for t in d["tags"].get("equipment", [])[:2]:
                                     tags_html += f'<span class="tag-badge tag-equipment">{t}</span>'
                                 st.markdown(tags_html, unsafe_allow_html=True)
@@ -1493,16 +1573,16 @@ def main():
             
             st.session_state.messages.append({"role": "assistant", "content": resp})
     
-    # TAB 2: Documents (继续...)
-    with tab2:
-        st.markdown("### 📄 Documents")
+    # TAB 2: Documents
+    with tabs[1]:
+        st.markdown("### Documents")
         if not workspace.metadata:
             st.info("No documents yet.")
         else:
             left, right = st.columns([1, 2.2])
             
             with left:
-                st.markdown("#### 🔍 Filter")
+                st.markdown("#### Filter")
                 q = st.text_input("Search", key="doc_search")
                 
                 docs = workspace.metadata
@@ -1527,33 +1607,31 @@ def main():
                     selected_doc = next((d for d in docs if d["doc_id"] == sel_id), None)
                 
                 if selected_doc:
-                    if st.button("🗑️ Delete", use_container_width=True, key="del_doc"):
+                    if st.button("Delete", use_container_width=True, key="del_doc"):
                         workspace.delete_document(selected_doc["doc_id"])
                         st.success("Deleted!")
                         st.rerun()
             
             with right:
-                st.markdown("#### 👀 Preview")
+                st.markdown("#### Preview")
                 if not selected_doc:
-                    st.info("← Select a doc")
+                    st.info("Select a document")
                 else:
                     doc = selected_doc
                     st.markdown(f"### {doc['filename']}")
                     
-                    # Tags from filename
                     main_tag = doc["tags"].get("equipment", ["Other"])[0]
-                    st.caption(f"🏷️ Main Tag: **{main_tag}** (from filename)")
+                    st.caption(f"Main Tag: **{main_tag}** (from filename)")
                     
-                    status_html = f'<span class="tag-insurance">📋 {doc.get("insurance_type", "Other")}</span>'
+                    status_html = f'<span class="tag-insurance">{doc.get("insurance_type", "Other")}</span>'
                     if doc.get("has_deep_analysis"):
-                        status_html += ' <span class="analysis-badge">✅ Analyzed</span>'
+                        status_html += ' <span class="analysis-badge">Analyzed</span>'
                     st.markdown(status_html, unsafe_allow_html=True)
                     
                     with open(doc["file_path"], "rb") as f:
-                        st.download_button("⬇️ Download", f, file_name=doc["filename"], use_container_width=True, key=f"dl_{doc['doc_id']}")
+                        st.download_button("Download", f, file_name=doc["filename"], use_container_width=True, key=f"dl_{doc['doc_id']}")
                     
-                    # Preview
-                    with st.expander("📄 Content", expanded=False):
+                    with st.expander("Content", expanded=False):
                         ext = doc["file_format"]
                         if ext in ["docx", "doc"]:
                             text = extract_text_from_docx(doc["file_path"]) if ext == "docx" else ""
@@ -1561,20 +1639,22 @@ def main():
                         elif ext == "txt":
                             text = extract_text_from_txt(doc["file_path"])
                             st.text_area("", value=text[:3000], height=250, key=f"prevt_{doc['doc_id']}", label_visibility="collapsed")
+                        elif ext == "pdf":
+                            st.info("PDF - Download to view")
                         else:
                             st.info("Preview not available")
                     
-                    with st.expander("📊 Metadata"):
+                    with st.expander("Metadata"):
                         st.write(f"**Summary:** {doc['case_summary']}")
                         st.write(f"**Insights:** {doc['key_insights']}")
     
-    # TAB 3: Upload (使用文件名自动生成tag)
-    with tab3:
-        st.markdown("### 📤 Upload")
-        st.caption("🏷️ Main tag will be extracted from filename first word")
+    # TAB 3: Upload
+    with tabs[2]:
+        st.markdown("### Upload")
+        st.caption("Main tag will be extracted from filename first word")
         
         if st.session_state.upload_success:
-            st.success("✅ Uploaded!")
+            st.success("Uploaded!")
             st.session_state.upload_success = False
         
         with st.form("upload_form"):
@@ -1590,7 +1670,7 @@ def main():
             with col2:
                 deep_analysis = st.checkbox("Deep Analysis", value=False, key="deep_a")
             
-            submitted = st.form_submit_button("📤 Upload", use_container_width=True)
+            submitted = st.form_submit_button("Upload", use_container_width=True)
         
         if submitted and uploaded_file:
             with st.spinner("Processing..."):
@@ -1604,14 +1684,12 @@ def main():
                     
                     extracted_text = extract_text_from_file(temp_path, ext)
                     
-                    # Generate tags from filename
                     auto_tags = auto_generate_tags(uploaded_file.name, extracted_text[:1000])
                     
-                    st.success(f"🏷️ Extracted main tag: **{auto_tags['equipment'][0]}** from filename")
+                    st.success(f"Extracted main tag: **{auto_tags['equipment'][0]}** from filename")
                     
                     if auto_tag:
                         auto = auto_annotate_by_llm(extracted_text, uploaded_file.name)
-                        # Merge filename tag with LLM tags
                         auto["tags"]["equipment"] = auto_tags["equipment"] + [t for t in auto["tags"].get("equipment", []) if t not in auto_tags["equipment"]]
                         auto["tags"]["industry"] = auto_tags["industry"]
                         auto["tags"]["timeline"] = auto_tags["timeline"]
@@ -1650,13 +1728,13 @@ def main():
                         pass
                     
                     if auto_tag:
-                        with st.expander("🔎 Auto-Tag Results"):
+                        with st.expander("Auto-Tag Results"):
                             st.write(f"**Main Tag (from filename):** {auto_tags['equipment'][0]}")
                             st.write(f"**Type:** {auto.get('insurance_type')}")
                             st.write(f"**Decision:** {auto['decision']}")
                     
                     if deep_analysis:
-                        st.info("🔬 Starting analysis...")
+                        st.info("Starting analysis...")
                         analysis_result = perform_dual_track_analysis(
                             file_path=doc["file_path"],
                             file_format=doc["file_format"],
@@ -1682,10 +1760,10 @@ def main():
         elif submitted:
             st.error("Select a file")
     
-    # TAB 4: Analysis (显示分类结果)
-    with tab4:
-        st.markdown("### 🔬 Analysis")
-        st.caption("Handwriting classification: 结论 | 待办 | 风险点 | 对外口径")
+    # TAB 4: Analysis
+    with tabs[3]:
+        st.markdown("### Analysis")
+        st.caption("Handwriting classification: Conclusion | Todo | Risk | Communication")
         
         if not workspace.metadata:
             st.info("No documents.")
@@ -1704,11 +1782,11 @@ def main():
                         st.write(f"**{ana_doc['filename']}**")
                     with col2:
                         if ana_doc.get("has_deep_analysis"):
-                            st.success("✅")
+                            st.success("Analyzed")
                         else:
-                            st.info("⏳")
+                            st.info("Not analyzed")
                     
-                    if st.button("🚀 Start", type="primary", use_container_width=True, key="start_ana"):
+                    if st.button("Start Analysis", type="primary", use_container_width=True, key="start_ana"):
                         analysis_result = perform_dual_track_analysis(
                             file_path=ana_doc["file_path"],
                             file_format=ana_doc["file_format"],
@@ -1726,44 +1804,40 @@ def main():
                         st.balloons()
                         st.rerun()
                     
-                    # Show results
                     ana_file = os.path.join(ANALYSIS_DIR, f"{ana_doc_id}_dual_analysis.json")
                     if os.path.exists(ana_file):
                         st.markdown("---")
-                        st.markdown("### 📊 Results")
+                        st.markdown("### Results")
                         
                         try:
                             with open(ana_file, 'r', encoding='utf-8') as f:
                                 ana_data = json.load(f)
                             
-                            # Category counts
                             cat_counts = ana_data['metadata'].get('annotation_categories', {})
                             if cat_counts:
-                                st.markdown("#### 📑 Handwriting Categories")
+                                st.markdown("#### Handwriting Categories")
                                 c1, c2, c3, c4 = st.columns(4)
                                 with c1:
-                                    st.metric("✅ 结论", cat_counts.get('conclusion', 0))
+                                    st.metric("Conclusion", cat_counts.get('conclusion', 0))
                                 with c2:
-                                    st.metric("📋 待办", cat_counts.get('todo', 0))
+                                    st.metric("To-Do", cat_counts.get('todo', 0))
                                 with c3:
-                                    st.metric("⚠️ 风险点", cat_counts.get('risk', 0))
+                                    st.metric("Risk", cat_counts.get('risk', 0))
                                 with c4:
-                                    st.metric("💬 对外口径", cat_counts.get('communication', 0))
+                                    st.metric("Communication", cat_counts.get('communication', 0))
                             
-                            # View modes
-                            view = st.radio("View:", ["🔗 Summary", "✍️ Classifications", "📝 Electronic", "❓ Q&A"], horizontal=True, key="view")
+                            view = st.radio("View:", ["Summary", "Classifications", "Electronic", "Q&A"], horizontal=True, key="view")
                             
-                            if view == "🔗 Summary":
+                            if view == "Summary":
                                 st.markdown(ana_data.get("dual_track_analysis", {}).get("integration_summary", "No summary"))
                             
-                            elif view == "✍️ Classifications":
-                                st.markdown("#### ✍️ Classified Handwriting Annotations")
+                            elif view == "Classifications":
+                                st.markdown("#### Classified Handwriting Annotations")
                                 
                                 hw_data = ana_data.get("dual_track_analysis", {}).get("handwritten_annotations", {})
                                 annotations = hw_data.get("annotations", [])
                                 
                                 if annotations:
-                                    # Group by category
                                     by_cat = {
                                         "conclusion": [],
                                         "todo": [],
@@ -1776,9 +1850,8 @@ def main():
                                         if cat in by_cat:
                                             by_cat[cat].append(ann)
                                     
-                                    # Display by category
                                     if by_cat["conclusion"]:
-                                        st.markdown('<div class="category-conclusion">✅ 结论 (Conclusions)</div>', unsafe_allow_html=True)
+                                        st.markdown('<div class="category-conclusion">Conclusions</div>', unsafe_allow_html=True)
                                         for ann in by_cat["conclusion"]:
                                             with st.expander(f"{ann.get('text', '')[:60]}..."):
                                                 st.write(f"**Text:** {ann.get('text')}")
@@ -1788,7 +1861,7 @@ def main():
                                                     st.write(f"**Context:** {ann.get('context')}")
                                     
                                     if by_cat["todo"]:
-                                        st.markdown('<div class="category-todo">📋 待办 (To-Do)</div>', unsafe_allow_html=True)
+                                        st.markdown('<div class="category-todo">To-Do</div>', unsafe_allow_html=True)
                                         for ann in by_cat["todo"]:
                                             with st.expander(f"{ann.get('text', '')[:60]}..."):
                                                 st.write(f"**Text:** {ann.get('text')}")
@@ -1797,7 +1870,7 @@ def main():
                                                 st.write(f"**Location:** {ann.get('location')}")
                                     
                                     if by_cat["risk"]:
-                                        st.markdown('<div class="category-risk">⚠️ 风险点 (Risk Factors)</div>', unsafe_allow_html=True)
+                                        st.markdown('<div class="category-risk">Risk Factors</div>', unsafe_allow_html=True)
                                         for ann in by_cat["risk"]:
                                             with st.expander(f"{ann.get('text', '')[:60]}..."):
                                                 st.write(f"**Text:** {ann.get('text')}")
@@ -1805,7 +1878,7 @@ def main():
                                                 st.write(f"**Location:** {ann.get('location')}")
                                     
                                     if by_cat["communication"]:
-                                        st.markdown('<div class="category-communication">💬 对外口径 (External Communication)</div>', unsafe_allow_html=True)
+                                        st.markdown('<div class="category-communication">External Communication</div>', unsafe_allow_html=True)
                                         for ann in by_cat["communication"]:
                                             with st.expander(f"{ann.get('text', '')[:60]}..."):
                                                 st.write(f"**Text:** {ann.get('text')}")
@@ -1813,10 +1886,10 @@ def main():
                                 else:
                                     st.info("No handwriting annotations found")
                             
-                            elif view == "📝 Electronic":
+                            elif view == "Electronic":
                                 st.json(ana_data.get("dual_track_analysis", {}).get("electronic_text", {}))
                             
-                            elif view == "❓ Q&A":
+                            elif view == "Q&A":
                                 qa = ana_data.get("dual_track_analysis", {}).get("qa_pairs", [])
                                 if qa:
                                     for i, q in enumerate(qa, 1):
@@ -1826,9 +1899,8 @@ def main():
                                 else:
                                     st.info("No Q&A pairs")
                             
-                            # Download
                             st.download_button(
-                                "📥 Download JSON",
+                                "Download JSON",
                                 json.dumps(ana_data, indent=2, ensure_ascii=False),
                                 file_name=f"{ana_doc_id}_analysis.json",
                                 mime="application/json",
@@ -1837,22 +1909,22 @@ def main():
                         except Exception as e:
                             st.error(f"Error: {e}")
     
-    # TAB 5: Review (添加分类选择)
-    with tab5:
-        st.markdown("### 👥 Review Workbench")
+    # TAB 5: Review
+    with tabs[4]:
+        st.markdown("### Review Workbench")
         st.caption("Review and classify handwriting")
         
         pending = get_all_pending_reviews(workspace)
         
         if not pending:
-            st.success("✅ No pending reviews!")
+            st.success("No pending reviews!")
         else:
-            st.warning(f"⚠️ {len(pending)} items")
+            st.warning(f"{len(pending)} items need review")
             
             if st.session_state.review_submitted:
-                st.success("✅ Submitted!")
+                st.success("Submitted!")
                 st.session_state.review_submitted = False
-                if st.button("🔄 Refresh"):
+                if st.button("Refresh"):
                     st.session_state.current_review_index = 0
                     st.rerun()
             
@@ -1882,7 +1954,7 @@ def main():
                             except:
                                 st.error("Image error")
                         else:
-                            st.info("📷 No image")
+                            st.info("No image")
                     
                     with col2:
                         st.markdown("**Classify handwriting:**")
@@ -1912,9 +1984,9 @@ def main():
                     
                     col_sub, col_skip = st.columns(2)
                     with col_sub:
-                        submit = st.form_submit_button("✅ Submit", use_container_width=True)
+                        submit = st.form_submit_button("Submit", use_container_width=True)
                     with col_skip:
-                        skip = st.form_submit_button("⏭️ Skip", use_container_width=True)
+                        skip = st.form_submit_button("Skip", use_container_width=True)
                     
                     if submit:
                         if not transcribed:
@@ -1939,17 +2011,16 @@ def main():
                         st.session_state.current_review_index = (idx + 1) % len(pending)
                         st.rerun()
                 
-                # Nav
                 st.markdown("---")
                 n1, n2, n3 = st.columns([1, 2, 1])
                 with n1:
-                    if st.button("⬅️ Prev", disabled=(idx == 0), use_container_width=True, key="prev"):
+                    if st.button("Previous", disabled=(idx == 0), use_container_width=True, key="prev"):
                         st.session_state.current_review_index = idx - 1
                         st.rerun()
                 with n2:
                     st.markdown(f"<center>{idx + 1} / {len(pending)}</center>", unsafe_allow_html=True)
                 with n3:
-                    if st.button("Next ➡️", disabled=(idx >= len(pending) - 1), use_container_width=True, key="next"):
+                    if st.button("Next", disabled=(idx >= len(pending) - 1), use_container_width=True, key="next"):
                         st.session_state.current_review_index = idx + 1
                         st.rerun()
 
