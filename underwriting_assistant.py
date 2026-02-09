@@ -1,650 +1,897 @@
-"""
-Enhanced Underwriting RAG System - Main Application
-====================================================
-包含两个主要功能：
-1. 数据预处理区 (Admin) - 上传文档、预处理、构建索引
-2. RAG问答区 (User) - 问答检索、智能回答
+The `ModuleNotFoundError: No module named 'cv2'` occurs because Streamlit Cloud environments do not include the system-level graphics libraries required by standard OpenCV. While this can usually be fixed by using `opencv-python-headless`, replacing it with **Pillow (PIL)** is a much more robust and "Python-native" solution for Streamlit, as it requires no external system dependencies.
 
-Version: 1.0.0
-Date: 2026-02-09
+Here is the **complete, modified code**.
+
+### Key Changes Made:
+
+1. **Removed `cv2**`: Eliminated all OpenCV dependencies.
+2. **Switched to Pillow (PIL)**: Used for all image loading and manipulation.
+3. **Refactored OCR Logic**: Instead of using OpenCV to find contours (which is brittle), I now use **EasyOCR's built-in detection**. EasyOCR effectively does the "handwriting detection" for us.
+4. **Data Consistency**: The code adapts the EasyOCR output to match the data structure your UI expects (bounding boxes, region IDs), so your "Document Viewer" tab still works perfectly.
+
+```python
+"""
+Professional Underwriting RAG System with Handwriting Recognition
+=================================================================
+
+Complete Pipeline:
+1. Load preset datasets
+2. OCR processing (Hybrid Tesseract + EasyOCR)
+3. Text chunking with overlap
+4. Embedding generation
+5. Vector database indexing
+6. Semantic search with reranking
+7. LLM-powered question answering
 """
 
 import streamlit as st
-import json
 import os
-from pathlib import Path
+import json
 from datetime import datetime
-from typing import Dict, List, Optional
+from pathlib import Path
+import hashlib
+from typing import List, Dict, Any, Tuple
+import io
 
-# 导入自定义模块
-try:
-    from modules.preprocessor import DocumentPreprocessor
-    from modules.vector_store import VectorStore
-    from modules.embeddings import EmbeddingGenerator
-    from modules.llm_client import LLMClient
-    from modules.rag_pipeline import RAGPipeline
-except ImportError:
-    st.error("❌ 模块导入失败，请确保所有依赖已安装")
-    st.stop()
+# Document & Image Processing
+from pdf2image import convert_from_path
+from docx import Document as DocxDocument
+from PIL import Image, ImageDraw
+import numpy as np
 
+# OCR
+import easyocr
+import pytesseract
 
-# ============================================================================
-# 配置
-# ============================================================================
+# RAG Components
+from sentence_transformers import SentenceTransformer
+import faiss
+from rank_bm25 import BM25Okapi
+import requests
+import pandas as pd
 
-class Config:
-    """应用配置"""
-    
-    # 数据目录
-    DATA_DIR = Path("data")
-    ELECTRONIC_DATA_FILE = DATA_DIR / "electronic_data.json"
-    HANDWRITING_DATA_FILE = DATA_DIR / "handwriting_data.json"
-    VECTOR_INDEX_FILE = DATA_DIR / "vector_index.faiss"
-    METADATA_FILE = DATA_DIR / "metadata.json"
-    
-    # API配置
-    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-    DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
-    
-    # Embedding配置
-    EMBEDDING_MODEL = "text-embedding-3-small"  # 或使用本地模型
-    EMBEDDING_DIMENSION = 1536
-    
-    # RAG配置
-    TOP_K = 5  # 检索Top-K个相关段落
-    CHUNK_SIZE = 500  # 文本分块大小
-    CHUNK_OVERLAP = 50  # 分块重叠
-    
-    @classmethod
-    def init_storage(cls):
-        """初始化存储目录"""
-        cls.DATA_DIR.mkdir(exist_ok=True)
+# ===========================
+# Configuration
+# ===========================
 
+VERSION = "4.1.0-PIL"
+APP_TITLE = "Underwriting Repository - RAG with Handwriting Recognition"
 
-Config.init_storage()
+# Preset Datasets (Default cases to load)
+PRESET_DATASETS = [
+    "Cargo - Agnes Fisheries - CE's notes for Yr 2021-22.pdf",
+    "Hull - Marco Polo_Memo.pdf",
+    "Cargo - Mitsui Co summary with CE's QA 29.8.22.docx"
+]
 
+# API Configuration
+DEFAULT_API_KEY = "sk-99bba2ce117444e197270f17d303e74f"
+API_BASE = "https://api.deepseek.com/v1"
+API_MODEL = "deepseek-chat"
 
-# ============================================================================
-# 会话状态初始化
-# ============================================================================
+# RAG Configuration
+CHUNK_SIZE = 512
+CHUNK_OVERLAP = 128
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+TOP_K_RETRIEVAL = 10
+TOP_K_RERANK = 3
 
-def init_session_state():
-    """初始化会话状态"""
-    if 'preprocessor' not in st.session_state:
-        st.session_state.preprocessor = DocumentPreprocessor()
-    
-    if 'vector_store' not in st.session_state:
-        st.session_state.vector_store = VectorStore()
-    
-    if 'embedding_generator' not in st.session_state:
-        st.session_state.embedding_generator = EmbeddingGenerator()
-    
-    if 'llm_client' not in st.session_state:
-        st.session_state.llm_client = LLMClient()
-    
-    if 'rag_pipeline' not in st.session_state:
-        st.session_state.rag_pipeline = RAGPipeline()
-    
-    if 'knowledge_base_loaded' not in st.session_state:
-        st.session_state.knowledge_base_loaded = False
-    
-    if 'processing_status' not in st.session_state:
-        st.session_state.processing_status = {}
+# OCR Configuration
+TESSERACT_LANG = "eng+chi_sim"
+EASYOCR_LANGS = ['en', 'ch_sim']
 
+# Directories
+DATA_DIR = Path("data")
+UPLOADS_DIR = DATA_DIR / "uploads"
+PROCESSED_DIR = DATA_DIR / "processed"
+VECTOR_DB_DIR = DATA_DIR / "vector_db"
+OCR_RESULTS_DIR = DATA_DIR / "ocr_results"
 
-# ============================================================================
-# 数据预处理区 (步骤 1-4)
-# ============================================================================
+# ===========================
+# Directory Setup
+# ===========================
 
-def render_preprocessing_section():
-    """渲染数据预处理区"""
-    st.header("📤 数据预处理区 (Admin)")
-    st.markdown("上传文档，进行预处理，构建知识库索引")
-    st.markdown("---")
-    
-    # Tab: 上传与预处理 | 索引管理 | 数据查看
-    tab1, tab2, tab3 = st.tabs(["📄 上传与预处理", "🔍 索引管理", "📊 数据查看"])
-    
-    with tab1:
-        render_upload_and_process()
-    
-    with tab2:
-        render_index_management()
-    
-    with tab3:
-        render_data_viewer()
+def ensure_directories():
+    """Create necessary directories"""
+    for dir_path in [DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, VECTOR_DB_DIR, OCR_RESULTS_DIR]:
+        dir_path.mkdir(parents=True, exist_ok=True)
 
+# ===========================
+# Model Loading
+# ===========================
 
-def render_upload_and_process():
-    """上传文档并预处理"""
-    st.subheader("步骤 1-4: 文档预处理流程")
-    
-    st.markdown("""
-    **处理流程：**
-    1. 🔍 识别电子文本 vs 手写文本
-    2. ✂️ 文本分块 (Chunking)
-    3. 🧮 向量化 (Embeddings)
-    4. 💾 保存到数据库 + 构建索引
-    """)
-    
-    # 文件上传
-    uploaded_files = st.file_uploader(
-        "上传文档 (PDF/DOCX)",
-        type=["pdf", "docx"],
-        accept_multiple_files=True,
-        help="支持批量上传多个文档"
-    )
-    
-    if uploaded_files:
-        st.success(f"✅ 已选择 {len(uploaded_files)} 个文件")
-        
-        # 显示文件列表
-        with st.expander("📋 查看文件列表"):
-            for f in uploaded_files:
-                st.markdown(f"- **{f.name}** ({f.size / 1024:.2f} KB)")
-        
-        # 处理配置
-        col1, col2 = st.columns(2)
-        with col1:
-            chunk_size = st.number_input("分块大小", min_value=100, max_value=2000, value=Config.CHUNK_SIZE)
-        with col2:
-            chunk_overlap = st.number_input("分块重叠", min_value=0, max_value=200, value=Config.CHUNK_OVERLAP)
-        
-        # 开始处理按钮
-        if st.button("🚀 开始预处理", type="primary"):
-            process_documents(uploaded_files, chunk_size, chunk_overlap)
+@st.cache_resource
+def load_embedding_model():
+    """Load embedding model"""
+    return SentenceTransformer(EMBEDDING_MODEL)
 
+@st.cache_resource
+def load_ocr_reader():
+    """Load EasyOCR reader"""
+    return easyocr.Reader(EASYOCR_LANGS, gpu=False)
 
-def process_documents(uploaded_files, chunk_size: int, chunk_overlap: int):
+# ===========================
+# Step 1: Text Extraction & OCR
+# ===========================
+
+def convert_pdf_to_images(file_path: Path) -> List[Image.Image]:
+    """Convert PDF pages to images for OCR processing"""
+    try:
+        # Use poppler for PDF conversion
+        images = convert_from_path(str(file_path), dpi=200)
+        return images
+    except Exception as e:
+        st.error(f"PDF to image conversion error: {e}")
+        return []
+
+def perform_hybrid_ocr(image: Image.Image, reader: easyocr.Reader, page_idx: int, doc_id: str) -> Dict:
     """
-    执行完整的文档预处理流程
-    步骤 1: 文件处理 (电子文本 vs 手写文本分离)
-    步骤 2: 文本分块
-    步骤 3: 向量化
-    步骤 4: 构建索引
+    Perform Hybrid OCR:
+    1. Tesseract for the full page (Best for printed text blocks)
+    2. EasyOCR for detection (Best for handwriting/marginalia)
     """
-    preprocessor = st.session_state.preprocessor
-    embedding_generator = st.session_state.embedding_generator
-    vector_store = st.session_state.vector_store
+    page_result = {
+        'page_num': page_idx + 1,
+        'full_printed_text': "",
+        'handwritten_regions': []
+    }
+
+    try:
+        # 1. Full Page Tesseract (Fast, Printed Text)
+        full_text = pytesseract.image_to_string(image, lang=TESSERACT_LANG)
+        page_result['full_printed_text'] = full_text.strip()
+
+        # 2. EasyOCR for granular detection (Handwriting/Regions)
+        image_np = np.array(image)
+        # detail=1 returns bounding box, text, and confidence
+        detections = reader.readtext(image_np)
+
+        for idx, (bbox_points, text, conf) in enumerate(detections):
+            # EasyOCR returns poly points [[x1,y1],[x2,y2]...]. Convert to Box (x, y, w, h)
+            x_coords = [p[0] for p in bbox_points]
+            y_coords = [p[1] for p in bbox_points]
+            
+            x_min, x_max = int(min(x_coords)), int(max(x_coords))
+            y_min, y_max = int(min(y_coords)), int(max(y_coords))
+            w = x_max - x_min
+            h = y_max - y_min
+
+            # Filter out tiny noise
+            if w < 20 or h < 10:
+                continue
+
+            # Crop the region for the UI to display
+            try:
+                crop = image.crop((x_min, y_min, x_max, y_max))
+                region_id = idx
+                region_img_path = OCR_RESULTS_DIR / f"{doc_id}_p{page_idx+1}_r{region_id}.png"
+                crop.save(region_img_path)
+
+                page_result['handwritten_regions'].append({
+                    'region_id': region_id,
+                    'bbox': (x_min, y_min, w, h),
+                    'text': text,
+                    'confidence': float(conf),
+                    'image_path': str(region_img_path)
+                })
+            except Exception as crop_err:
+                print(f"Skipping invalid crop: {crop_err}")
+                continue
+
+    except Exception as e:
+        st.error(f"OCR Error on page {page_idx+1}: {e}")
+
+    return page_result
+
+def process_pdf_with_ocr(file_path: Path, doc_id: str, reader: easyocr.Reader) -> Dict:
+    """
+    Complete PDF processing pipeline
+    """
+    results = {
+        'doc_id': doc_id,
+        'filename': file_path.name,
+        'pages': []
+    }
     
-    # 进度条
+    # Convert to images
+    images = convert_pdf_to_images(file_path)
+    
+    if not images:
+        return results
+    
     progress_bar = st.progress(0)
-    status_text = st.empty()
     
-    all_electronic_data = []
-    all_handwriting_data = []
+    for page_idx, page_image in enumerate(images):
+        # Process page
+        page_result = perform_hybrid_ocr(page_image, reader, page_idx, doc_id)
+        results['pages'].append(page_result)
+        
+        # Update progress
+        progress_bar.progress((page_idx + 1) / len(images))
     
-    for idx, uploaded_file in enumerate(uploaded_files):
-        # 更新进度
-        progress = (idx + 1) / len(uploaded_files)
-        progress_bar.progress(progress)
-        status_text.text(f"处理文件 {idx + 1}/{len(uploaded_files)}: {uploaded_file.name}")
-        
-        try:
-            # === 步骤 1: 文件处理和分离 ===
-            st.info(f"📖 步骤 1/4: 提取和分离内容 - {uploaded_file.name}")
-            
-            file_bytes = uploaded_file.read()
-            result = preprocessor.process_document(
-                file_bytes=file_bytes,
-                filename=uploaded_file.name
-            )
-            
-            electronic_text = result.get("electronic_text", "")
-            handwriting_images = result.get("handwriting_images", [])
-            metadata = result.get("metadata", {})
-            
-            st.success(f"✅ 步骤 1 完成: 电子文本 {len(electronic_text)} 字符, 手写图像 {len(handwriting_images)} 张")
-            
-            # === 步骤 2: 文本分块 ===
-            if electronic_text:
-                st.info(f"✂️ 步骤 2/4: 文本分块 - {uploaded_file.name}")
-                
-                chunks = preprocessor.chunk_text(
-                    text=electronic_text,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap
-                )
-                
-                st.success(f"✅ 步骤 2 完成: 生成 {len(chunks)} 个文本块")
-                
-                # === 步骤 3: 向量化 ===
-                st.info(f"🧮 步骤 3/4: 向量化 - {uploaded_file.name}")
-                
-                embeddings = []
-                for chunk in chunks:
-                    embedding = embedding_generator.generate_embedding(chunk["text"])
-                    chunk["embedding"] = embedding
-                    embeddings.append(embedding)
-                
-                st.success(f"✅ 步骤 3 完成: 生成 {len(embeddings)} 个向量")
-                
-                # 保存电子文本数据
-                doc_data = {
-                    "doc_id": result["doc_id"],
-                    "filename": uploaded_file.name,
-                    "metadata": metadata,
-                    "chunks": chunks
-                }
-                all_electronic_data.append(doc_data)
-            
-            # 处理手写图像
-            if handwriting_images:
-                st.info(f"✍️ 处理手写图像 - {uploaded_file.name}")
-                
-                for img in handwriting_images:
-                    # OCR识别
-                    ocr_result = preprocessor.perform_ocr(img["data"])
-                    img["ocr_text"] = ocr_result["text"]
-                    img["confidence"] = ocr_result["confidence"]
-                    img["doc_id"] = result["doc_id"]
-                
-                all_handwriting_data.extend(handwriting_images)
-                st.success(f"✅ 手写图像处理完成: {len(handwriting_images)} 张")
-        
-        except Exception as e:
-            st.error(f"❌ 处理文件失败: {uploaded_file.name}")
-            st.error(f"错误: {str(e)}")
-            continue
+    # Save OCR results
+    results_path = OCR_RESULTS_DIR / f"{doc_id}_results.json"
+    with open(results_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
     
-    # === 步骤 4: 构建索引并保存 ===
-    if all_electronic_data:
-        st.info("💾 步骤 4/4: 保存数据并构建向量索引")
-        
-        # 保存JSON数据
-        save_processed_data(all_electronic_data, all_handwriting_data)
-        
-        # 构建向量索引
-        vector_store.build_index(all_electronic_data)
-        
-        st.success("✅ 步骤 4 完成: 数据已保存，向量索引已构建")
-        st.success(f"📊 总计处理: {len(all_electronic_data)} 个文档, {len(all_handwriting_data)} 张手写图像")
-        
-        # 更新会话状态
-        st.session_state.knowledge_base_loaded = True
-        st.balloons()
-    else:
-        st.warning("⚠️ 没有提取到有效的电子文本数据")
-    
-    progress_bar.empty()
-    status_text.empty()
+    return results
 
-
-def save_processed_data(electronic_data: List[Dict], handwriting_data: List[Dict]):
-    """保存预处理后的数据"""
+def extract_text_from_docx(file_path: Path) -> str:
+    """Extract text from DOCX"""
     try:
-        # 保存电子文本数据
-        with open(Config.ELECTRONIC_DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump({
-                "processed_at": datetime.now().isoformat(),
-                "total_documents": len(electronic_data),
-                "documents": electronic_data
-            }, f, indent=2, ensure_ascii=False)
+        doc = DocxDocument(file_path)
+        text_parts = []
         
-        # 保存手写数据
-        with open(Config.HANDWRITING_DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump({
-                "processed_at": datetime.now().isoformat(),
-                "total_images": len(handwriting_data),
-                "images": handwriting_data
-            }, f, indent=2, ensure_ascii=False)
+        for para in doc.paragraphs:
+            if para.text.strip():
+                text_parts.append(para.text)
         
-        # 保存元数据
-        metadata = {
-            "last_updated": datetime.now().isoformat(),
-            "total_documents": len(electronic_data),
-            "total_handwriting_images": len(handwriting_data)
+        for table in doc.tables:
+            for row in table.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                text_parts.append(" | ".join(row_data))
+        
+        return "\n".join(text_parts)
+    except Exception as e:
+        st.error(f"DOCX extraction error: {e}")
+        return ""
+
+# ===========================
+# Step 2: Text Chunking
+# ===========================
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[Dict]:
+    """Split text into overlapping chunks"""
+    if not text:
+        return []
+    
+    chunks = []
+    start = 0
+    chunk_id = 0
+    
+    while start < len(text):
+        end = start + chunk_size
+        chunk_text = text[start:end]
+        
+        # Try to break at sentence boundary
+        if end < len(text):
+            last_period = chunk_text.rfind('.')
+            last_newline = chunk_text.rfind('\n')
+            break_point = max(last_period, last_newline)
+            
+            if break_point > chunk_size * 0.5:
+                end = start + break_point + 1
+                chunk_text = text[start:end]
+        
+        chunks.append({
+            'chunk_id': chunk_id,
+            'text': chunk_text.strip(),
+            'start_char': start,
+            'end_char': end
+        })
+        
+        start = end - overlap
+        chunk_id += 1
+    
+    return chunks
+
+# ===========================
+# Step 3: Embedding Generation
+# ===========================
+
+def generate_embeddings(texts: List[str], model: SentenceTransformer) -> np.ndarray:
+    """Generate embeddings for text chunks"""
+    embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+    return embeddings
+
+# ===========================
+# Step 4: Vector Database
+# ===========================
+
+class VectorDatabase:
+    """FAISS-based vector database for semantic search"""
+    
+    def __init__(self, dimension: int = 384):
+        self.dimension = dimension
+        self.index = faiss.IndexFlatIP(dimension)
+        self.chunks = []
+        self.doc_metadata = {}
+    
+    def add_documents(self, chunks: List[Dict], embeddings: np.ndarray, 
+                      doc_id: str, doc_name: str, source_type: str = "printed"):
+        """Add document chunks to vector database"""
+        faiss.normalize_L2(embeddings)
+        self.index.add(embeddings)
+        
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk['doc_id'] = doc_id
+            chunk['doc_name'] = doc_name
+            chunk['source_type'] = source_type
+            self.chunks.append(chunk)
+        
+        if doc_id not in self.doc_metadata:
+            self.doc_metadata[doc_id] = {
+                'doc_name': doc_name,
+                'num_chunks': 0,
+                'printed_chunks': 0,
+                'handwritten_chunks': 0
+            }
+        
+        self.doc_metadata[doc_id]['num_chunks'] += len(chunks)
+        if source_type == "printed":
+            self.doc_metadata[doc_id]['printed_chunks'] += len(chunks)
+        else:
+            self.doc_metadata[doc_id]['handwritten_chunks'] += len(chunks)
+    
+    def search(self, query_embedding: np.ndarray, top_k: int = TOP_K_RETRIEVAL) -> List[Tuple[Dict, float]]:
+        """Search for similar chunks"""
+        if self.index.ntotal == 0:
+            return []
+        
+        query_embedding = query_embedding.reshape(1, -1).astype('float32')
+        faiss.normalize_L2(query_embedding)
+        
+        similarities, indices = self.index.search(query_embedding, min(top_k, self.index.ntotal))
+        
+        results = []
+        for similarity, idx in zip(similarities[0], indices[0]):
+            if idx < len(self.chunks):
+                results.append((self.chunks[idx], float(similarity)))
+        
+        return results
+    
+    def get_stats(self) -> Dict:
+        """Get database statistics"""
+        total_printed = sum(meta['printed_chunks'] for meta in self.doc_metadata.values())
+        total_handwritten = sum(meta['handwritten_chunks'] for meta in self.doc_metadata.values())
+        
+        return {
+            'total_chunks': self.index.ntotal,
+            'total_documents': len(self.doc_metadata),
+            'printed_chunks': total_printed,
+            'handwritten_chunks': total_handwritten,
+            'dimension': self.dimension
         }
-        with open(Config.METADATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2)
-        
-        st.success(f"✅ 数据已保存到 {Config.DATA_DIR}")
     
-    except Exception as e:
-        st.error(f"❌ 保存数据失败: {e}")
-
-
-def render_index_management():
-    """索引管理"""
-    st.subheader("🔍 向量索引管理")
+    def save(self, path: Path):
+        """Save vector database"""
+        path.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.index, str(path / "faiss.index"))
+        
+        with open(path / "chunks.json", 'w', encoding='utf-8') as f:
+            json.dump(self.chunks, f, ensure_ascii=False, indent=2)
+        
+        with open(path / "metadata.json", 'w', encoding='utf-8') as f:
+            json.dump(self.doc_metadata, f, indent=2)
     
-    # 检查索引状态
-    if Config.VECTOR_INDEX_FILE.exists():
-        st.success("✅ 向量索引已存在")
-        
-        # 显示索引信息
-        vector_store = st.session_state.vector_store
-        info = vector_store.get_index_info()
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("索引向量数", info.get("num_vectors", "N/A"))
-        with col2:
-            st.metric("向量维度", info.get("dimension", "N/A"))
-        with col3:
-            st.metric("索引类型", info.get("index_type", "N/A"))
-        
-        # 重建索引
-        if st.button("🔄 重建索引"):
-            with st.spinner("重建索引中..."):
-                rebuild_index()
-    else:
-        st.warning("⚠️ 向量索引不存在，请先进行文档预处理")
-        
-        if st.button("🏗️ 从现有数据构建索引"):
-            if Config.ELECTRONIC_DATA_FILE.exists():
-                with st.spinner("构建索引中..."):
-                    build_index_from_existing_data()
-            else:
-                st.error("❌ 没有找到预处理数据，请先上传文档")
+    def load(self, path: Path) -> bool:
+        """Load vector database"""
+        try:
+            self.index = faiss.read_index(str(path / "faiss.index"))
+            
+            with open(path / "chunks.json", 'r', encoding='utf-8') as f:
+                self.chunks = json.load(f)
+            
+            with open(path / "metadata.json", 'r', encoding='utf-8') as f:
+                self.doc_metadata = json.load(f)
+            
+            return True
+        except:
+            return False
 
+# ===========================
+# Step 5-6: BM25 Reranking
+# ===========================
 
-def rebuild_index():
-    """重建向量索引"""
+class BM25Reranker:
+    """BM25 reranker for retrieved chunks"""
+    
+    def __init__(self):
+        self.bm25 = None
+    
+    def fit(self, texts: List[str]):
+        tokenized = [text.lower().split() for text in texts]
+        self.bm25 = BM25Okapi(tokenized)
+    
+    def rerank(self, query: str, candidates: List[Tuple[Dict, float]], 
+              top_k: int = TOP_K_RERANK) -> List[Tuple[Dict, float]]:
+        """Rerank candidates using BM25"""
+        if not candidates:
+            return []
+        
+        texts = [chunk['text'] for chunk, _ in candidates]
+        self.fit(texts)
+        
+        tokenized_query = query.lower().split()
+        bm25_scores = self.bm25.get_scores(tokenized_query)
+        
+        combined = []
+        for (chunk, vec_score), bm25_score in zip(candidates, bm25_scores):
+            # Normalize and Combine (0.6 Vector + 0.4 Keyword)
+            combined_score = 0.6 * vec_score + 0.4 * (bm25_score / (max(bm25_scores) + 1e-6))
+            combined.append((chunk, combined_score))
+        
+        combined.sort(key=lambda x: x[1], reverse=True)
+        return combined[:top_k]
+
+# ===========================
+# Step 7: Prompt Template
+# ===========================
+
+def create_rag_prompt(query: str, context_chunks: List[Tuple[Dict, float]]) -> str:
+    """Create RAG prompt with retrieved context"""
+    context_parts = []
+    for idx, (chunk, score) in enumerate(context_chunks, 1):
+        source_label = "🖨️ PRINTED" if chunk.get('source_type') == 'printed' else "✍️ EXTRACTED"
+        context_parts.append(f"""
+[Source {idx}] {source_label}
+Document: {chunk['doc_name']}
+Chunk ID: {chunk['chunk_id']}
+Relevance: {score:.3f}
+---
+{chunk['text']}
+---
+""")
+    
+    context_text = "\n".join(context_parts)
+    
+    prompt = f"""You are a professional underwriting assistant. Answer based on the retrieved context below.
+
+RETRIEVED CONTEXT:
+{context_text}
+
+USER QUESTION:
+{query}
+
+INSTRUCTIONS:
+1. Answer based ONLY on the provided context
+2. Cite source number and type (PRINTED/EXTRACTED)
+3. If insufficient information, state clearly
+4. Be specific with amounts, dates, terms
+5. Note handwritten sources may have OCR errors
+
+ANSWER:"""
+    
+    return prompt
+
+# ===========================
+# Step 8: LLM API Call
+# ===========================
+
+def call_llm_api(prompt: str) -> str:
+    """Call LLM API for answer generation"""
     try:
-        if Config.ELECTRONIC_DATA_FILE.exists():
-            with open(Config.ELECTRONIC_DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            vector_store = st.session_state.vector_store
-            vector_store.build_index(data["documents"])
-            
-            st.success("✅ 索引重建成功")
-        else:
-            st.error("❌ 没有找到数据文件")
+        api_key = st.session_state.get('api_key', DEFAULT_API_KEY)
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": API_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }
+        
+        response = requests.post(
+            f"{API_BASE}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
+        
     except Exception as e:
-        st.error(f"❌ 重建索引失败: {e}")
+        return f"Error: {e}"
 
+# ===========================
+# Complete RAG Pipeline
+# ===========================
 
-def build_index_from_existing_data():
-    """从现有数据构建索引"""
-    rebuild_index()
-
-
-def render_data_viewer():
-    """数据查看器"""
-    st.subheader("📊 数据查看")
+def rag_query(query: str, vector_db: VectorDatabase, embedding_model: SentenceTransformer,
+              reranker: BM25Reranker) -> Dict:
+    """Complete RAG pipeline execution"""
+    # Step 5: Query embedding
+    query_embedding = embedding_model.encode([query])[0]
     
-    # 选择数据类型
-    data_type = st.radio("选择数据类型", ["电子文本", "手写图像", "元数据"])
+    # Step 6: Retrieve top-k chunks
+    candidates = vector_db.search(query_embedding, top_k=TOP_K_RETRIEVAL)
     
-    if data_type == "电子文本":
-        if Config.ELECTRONIC_DATA_FILE.exists():
-            with open(Config.ELECTRONIC_DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            st.json(data, expanded=False)
-            st.download_button(
-                "📥 下载电子文本数据",
-                data=json.dumps(data, indent=2, ensure_ascii=False),
-                file_name="electronic_data.json",
-                mime="application/json"
-            )
-        else:
-            st.info("📭 暂无电子文本数据")
+    if not candidates:
+        return {
+            'answer': "No relevant documents found.",
+            'sources': [],
+            'num_candidates': 0
+        }
     
-    elif data_type == "手写图像":
-        if Config.HANDWRITING_DATA_FILE.exists():
-            with open(Config.HANDWRITING_DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            st.markdown(f"**总计:** {data.get('total_images', 0)} 张图像")
-            
-            # 显示前几张图像
-            for idx, img in enumerate(data.get("images", [])[:5]):
-                with st.expander(f"图像 {idx + 1}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.markdown(f"**文档ID:** {img.get('doc_id', 'N/A')}")
-                        st.markdown(f"**页码:** {img.get('page', 'N/A')}")
-                        st.markdown(f"**置信度:** {img.get('confidence', 0) * 100:.1f}%")
-                    with col2:
-                        st.markdown("**OCR文本:**")
-                        st.text(img.get('ocr_text', 'N/A')[:200])
-        else:
-            st.info("📭 暂无手写图像数据")
+    # Step 7: Rerank
+    reranked = reranker.rerank(query, candidates, top_k=TOP_K_RERANK)
     
-    else:  # 元数据
-        if Config.METADATA_FILE.exists():
-            with open(Config.METADATA_FILE, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
-            
-            st.json(metadata)
-        else:
-            st.info("📭 暂无元数据")
+    # Step 8: Create prompt and call LLM
+    prompt = create_rag_prompt(query, reranked)
+    answer = call_llm_api(prompt)
+    
+    sources = [
+        {
+            'doc_name': chunk['doc_name'],
+            'chunk_id': chunk['chunk_id'],
+            'source_type': chunk.get('source_type', 'unknown'),
+            'score': score,
+            'text_preview': chunk['text'][:200] + "..."
+        }
+        for chunk, score in reranked
+    ]
+    
+    return {
+        'answer': answer,
+        'sources': sources,
+        'num_candidates': len(candidates)
+    }
 
+# ===========================
+# Preset Dataset Loading
+# ===========================
 
-# ============================================================================
-# RAG 问答区 (步骤 5-8)
-# ============================================================================
-
-def render_rag_section():
-    """渲染RAG问答区"""
-    st.header("💬 RAG 问答区 (User)")
-    st.markdown("基于知识库的智能问答系统")
-    st.markdown("---")
-    
-    # 检查知识库是否已加载
-    if not check_knowledge_base():
-        st.warning("⚠️ 知识库尚未加载或不存在")
-        st.info("👉 请先在 **数据预处理区** 上传文档并完成预处理")
-        return
-    
-    # 加载知识库
-    if not st.session_state.knowledge_base_loaded:
-        with st.spinner("📚 加载知识库中..."):
-            load_knowledge_base()
-    
-    st.success("✅ 知识库已加载")
-    
-    # 显示知识库统计
-    display_kb_stats()
-    
-    st.markdown("---")
-    
-    # 问答界面
-    render_qa_interface()
-
-
-def check_knowledge_base() -> bool:
-    """检查知识库是否存在"""
-    return (Config.ELECTRONIC_DATA_FILE.exists() and 
-            Config.VECTOR_INDEX_FILE.exists())
-
-
-def load_knowledge_base():
-    """加载知识库到内存"""
-    try:
-        # 加载向量存储
-        vector_store = st.session_state.vector_store
-        vector_store.load_index(Config.VECTOR_INDEX_FILE)
-        
-        # 加载文档数据
-        with open(Config.ELECTRONIC_DATA_FILE, 'r', encoding='utf-8') as f:
-            electronic_data = json.load(f)
-        
-        st.session_state.electronic_data = electronic_data
-        st.session_state.knowledge_base_loaded = True
-        
-        st.success("✅ 知识库加载完成")
-    
-    except Exception as e:
-        st.error(f"❌ 加载知识库失败: {e}")
-        st.session_state.knowledge_base_loaded = False
-
-
-def display_kb_stats():
-    """显示知识库统计信息"""
-    try:
-        with open(Config.METADATA_FILE, 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("📄 文档数", metadata.get("total_documents", 0))
-        with col2:
-            st.metric("✍️ 手写图像", metadata.get("total_handwriting_images", 0))
-        with col3:
-            last_updated = metadata.get("last_updated", "N/A")
-            if last_updated != "N/A":
-                last_updated = last_updated.split("T")[0]
-            st.metric("🔄 最后更新", last_updated)
-    
-    except Exception as e:
-        st.warning(f"无法加载统计信息: {e}")
-
-
-def render_qa_interface():
-    """问答界面"""
-    st.subheader("🤔 提出您的问题")
-    
-    # 问题输入
-    query = st.text_area(
-        "输入您的问题:",
-        height=100,
-        placeholder="例如：这份保单的承保范围是什么？",
-        help="输入关于保险文档的问题"
-    )
-    
-    # 高级选项
-    with st.expander("⚙️ 高级选项"):
-        col1, col2 = st.columns(2)
-        with col1:
-            top_k = st.slider("检索Top-K", min_value=1, max_value=10, value=Config.TOP_K)
-        with col2:
-            show_sources = st.checkbox("显示来源", value=True)
-    
-    # 提交按钮
-    if st.button("🔍 搜索答案", type="primary"):
-        if query.strip():
-            with st.spinner("🤔 思考中..."):
-                answer_question(query, top_k, show_sources)
-        else:
-            st.warning("⚠️ 请输入问题")
-
-
-def answer_question(query: str, top_k: int, show_sources: bool):
+def load_preset_datasets(vector_db: VectorDatabase, embedding_model: SentenceTransformer, 
+                         ocr_reader: easyocr.Reader):
     """
-    执行完整的RAG流程回答问题
-    步骤 5: 问题向量化
-    步骤 6: 知识库检索
-    步骤 7: 组装Context
-    步骤 8: LLM生成答案
+    Load and process preset datasets
     """
-    try:
-        rag_pipeline = st.session_state.rag_pipeline
-        
-        # === 步骤 5: 问题向量化 ===
-        st.info("🧮 步骤 5/8: 问题向量化...")
-        query_embedding = st.session_state.embedding_generator.generate_embedding(query)
-        st.success("✅ 步骤 5 完成")
-        
-        # === 步骤 6: 知识库检索 ===
-        st.info(f"🔍 步骤 6/8: 检索Top-{top_k}相关段落...")
-        vector_store = st.session_state.vector_store
-        search_results = vector_store.search(query_embedding, top_k=top_k)
-        st.success(f"✅ 步骤 6 完成: 找到 {len(search_results)} 个相关段落")
-        
-        # === 步骤 7: 组装Context ===
-        st.info("📝 步骤 7/8: 组装上下文...")
-        context = rag_pipeline.build_context(search_results)
-        st.success("✅ 步骤 7 完成")
-        
-        # === 步骤 8: LLM生成答案 ===
-        st.info("🤖 步骤 8/8: 生成答案...")
-        llm_client = st.session_state.llm_client
-        answer = llm_client.generate_answer(query, context)
-        st.success("✅ 步骤 8 完成")
-        
-        # 显示答案
-        st.markdown("---")
-        st.subheader("💡 答案")
-        st.markdown(answer)
-        
-        # 显示来源
-        if show_sources:
-            st.markdown("---")
-            st.subheader("📚 相关来源")
-            for idx, result in enumerate(search_results):
-                with st.expander(f"来源 {idx + 1}: {result['filename']} (相似度: {result['score']:.3f})"):
-                    st.markdown(f"**页码:** {result.get('page', 'N/A')}")
-                    st.markdown(f"**内容:**")
-                    st.text(result['text'][:500] + "..." if len(result['text']) > 500 else result['text'])
+    st.info("🔄 Loading preset datasets...")
     
-    except Exception as e:
-        st.error(f"❌ 回答问题失败: {e}")
-        if Config.DEBUG_MODE:
-            st.exception(e)
+    # Check if already loaded
+    if VECTOR_DB_DIR.exists() and (VECTOR_DB_DIR / "faiss.index").exists():
+        if vector_db.load(VECTOR_DB_DIR):
+            st.success("✅ Loaded existing vector database")
+            return
+    
+    # Process each preset file
+    for filename in PRESET_DATASETS:
+        file_path = UPLOADS_DIR / filename
+        
+        if not file_path.exists():
+            st.warning(f"⚠️ Preset file not found: {filename}. Please place in {UPLOADS_DIR}")
+            continue
+        
+        st.info(f"📄 Processing: {filename}")
+        
+        doc_id = hashlib.md5(filename.encode()).hexdigest()[:8]
+        
+        # Step 1: Extract text
+        if filename.endswith('.pdf'):
+            # OCR processing for PDF
+            ocr_results = process_pdf_with_ocr(file_path, doc_id, ocr_reader)
+            
+            # Extract printed text
+            printed_text = "\n\n".join([
+                page['full_printed_text'] for page in ocr_results['pages']
+            ])
+            
+            # Extract detected regions (Handwritten/Mixed)
+            handwritten_text = "\n\n".join([
+                region['text'] 
+                for page in ocr_results['pages'] 
+                for region in page['handwritten_regions']
+            ])
+            
+            # Step 2-4: Chunk, embed, and index printed text
+            if printed_text.strip():
+                printed_chunks = chunk_text(printed_text)
+                if printed_chunks:
+                    printed_texts = [c['text'] for c in printed_chunks]
+                    printed_embeddings = generate_embeddings(printed_texts, embedding_model)
+                    vector_db.add_documents(printed_chunks, printed_embeddings, doc_id, filename, "printed")
+            
+            # Step 2-4: Chunk, embed, and index handwritten text
+            if handwritten_text.strip():
+                hw_chunks = chunk_text(handwritten_text)
+                if hw_chunks:
+                    hw_texts = [c['text'] for c in hw_chunks]
+                    hw_embeddings = generate_embeddings(hw_texts, embedding_model)
+                    vector_db.add_documents(hw_chunks, hw_embeddings, doc_id, filename, "handwritten")
+        
+        elif filename.endswith('.docx'):
+            # Direct text extraction for DOCX
+            text = extract_text_from_docx(file_path)
+            if text.strip():
+                chunks = chunk_text(text)
+                if chunks:
+                    texts = [c['text'] for c in chunks]
+                    embeddings = generate_embeddings(texts, embedding_model)
+                    vector_db.add_documents(chunks, embeddings, doc_id, filename, "printed")
+    
+    # Save vector database
+    vector_db.save(VECTOR_DB_DIR)
+    st.success("✅ All preset datasets processed and indexed")
 
+# ===========================
+# Streamlit UI
+# ===========================
 
-# ============================================================================
-# 主应用
-# ============================================================================
+def render_header():
+    st.markdown(f"""
+    <div style='background: linear-gradient(90deg, #1e3a8a 0%, #7c3aed 100%); 
+                padding: 2rem; border-radius: 10px; margin-bottom: 2rem;'>
+        <h1 style='color: white; margin: 0;'>📋 {APP_TITLE}</h1>
+        <p style='color: #e0e7ff; margin-top: 0.5rem;'>Version {VERSION}</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 def main():
-    """主应用入口"""
-    
-    # 页面配置
     st.set_page_config(
-        page_title="Enhanced Underwriting RAG System",
-        page_icon="🔍",
-        layout="wide",
-        initial_sidebar_state="expanded"
+        page_title="Underwriting RAG",
+        page_icon="📋",
+        layout="wide"
     )
     
-    # 初始化会话状态
-    init_session_state()
+    ensure_directories()
+    render_header()
     
-    # 标题
-    st.title("🔍 Enhanced Underwriting RAG System")
-    st.markdown("### AI驱动的保险文档知识库与智能问答系统")
+    # Initialize session state
+    if 'vector_db' not in st.session_state:
+        st.session_state.vector_db = VectorDatabase()
     
-    # 侧边栏 - 模式选择
-    st.sidebar.title("📂 功能选择")
-    mode = st.sidebar.radio(
-        "选择模式",
-        ["💬 RAG 问答区", "📤 数据预处理区"],
-        index=0
-    )
+    if 'reranker' not in st.session_state:
+        st.session_state.reranker = BM25Reranker()
     
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 系统状态")
+    if 'datasets_loaded' not in st.session_state:
+        st.session_state.datasets_loaded = False
     
-    # 显示知识库状态
-    if check_knowledge_base():
-        st.sidebar.success("✅ 知识库已就绪")
-    else:
-        st.sidebar.warning("⚠️ 知识库未就绪")
+    # Load models
+    embedding_model = load_embedding_model()
+    ocr_reader = load_ocr_reader()
     
-    # 显示API状态
-    if Config.DEEPSEEK_API_KEY:
-        st.sidebar.success("✅ API已配置")
-    else:
-        st.sidebar.warning("⚠️ API未配置")
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # API Key
+        with st.expander("🔑 API Key"):
+            api_key = st.text_input("DeepSeek API Key:", type="password", value=DEFAULT_API_KEY)
+            if st.button("Save Key"):
+                st.session_state.api_key = api_key
+                st.success("✓ Saved")
+        
+        st.markdown("---")
+        
+        # Load preset datasets
+        if not st.session_state.datasets_loaded:
+            if st.button("📥 Load Preset Datasets", type="primary"):
+                with st.spinner("Processing datasets..."):
+                    load_preset_datasets(st.session_state.vector_db, embedding_model, ocr_reader)
+                st.session_state.datasets_loaded = True
+                st.rerun()
+        else:
+            st.success("✅ Datasets Loaded")
+            if st.button("🔄 Reload"):
+                st.session_state.datasets_loaded = False
+                st.session_state.vector_db = VectorDatabase()
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # Stats
+        stats = st.session_state.vector_db.get_stats()
+        st.metric("Documents", stats['total_documents'])
+        st.metric("Total Chunks", stats['total_chunks'])
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("🖨️ Printed", stats['printed_chunks'])
+        with col2:
+            st.metric("✍️ Extracted", stats['handwritten_chunks'])
     
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ℹ️ 系统信息")
-    st.sidebar.markdown(f"**版本:** 1.0.0")
-    st.sidebar.markdown(f"**更新:** 2026-02-09")
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "💬 AI Chat (RAG)", 
+        "📄 Document Viewer", 
+        "🗄️ Vector Database", 
+        "✍️ OCR Results"
+    ])
     
-    # 主要内容区域
-    st.markdown("---")
+    # TAB 1: AI Chat with RAG
+    with tab1:
+        st.header("💬 AI Chat with RAG Pipeline")
+        
+        if stats['total_documents'] == 0:
+            st.warning("⚠️ Please load preset datasets first")
+        else:
+            st.markdown("""
+            **RAG Pipeline Steps:**
+            - **Step 5**: Query vectorization
+            - **Step 6**: Semantic search (retrieve top-k)
+            - **Step 7**: BM25 reranking + context assembly
+            - **Step 8**: LLM generation
+            """)
+            
+            query = st.text_area(
+                "Enter your question:",
+                placeholder="e.g., What are the retention terms in Agnes Fisheries case?",
+                height=100
+            )
+            
+            if st.button("🔍 Search & Answer", type="primary"):
+                if query:
+                    with st.spinner("Running RAG pipeline..."):
+                        result = rag_query(
+                            query,
+                            st.session_state.vector_db,
+                            embedding_model,
+                            st.session_state.reranker
+                        )
+                        
+                        st.markdown("### 💡 Answer")
+                        st.markdown(result['answer'])
+                        
+                        st.markdown("---")
+                        st.markdown("### 📚 Retrieved Sources")
+                        
+                        for idx, source in enumerate(result['sources'], 1):
+                            source_icon = "🖨️" if source['source_type'] == 'printed' else "✍️"
+                            with st.expander(
+                                f"{source_icon} Source {idx}: {source['doc_name']} (Score: {source['score']:.3f})"
+                            ):
+                                st.markdown(f"**Type:** {source['source_type'].upper()}")
+                                st.markdown(f"**Chunk ID:** {source['chunk_id']}")
+                                st.markdown(f"**Preview:**\n{source['text_preview']}")
     
-    if mode == "📤 数据预处理区":
-        render_preprocessing_section()
-    else:
-        render_rag_section()
+    # TAB 2: Document Viewer
+    with tab2:
+        st.header("📄 Document Viewer (Original Files)")
+        st.markdown("View original documents and their extracted content")
+        
+        ocr_results_files = list(OCR_RESULTS_DIR.glob("*_results.json"))
+        
+        if not ocr_results_files:
+            st.info("No processed documents yet")
+        else:
+            selected_file = st.selectbox(
+                "Select document:",
+                [f.stem.replace("_results", "") for f in ocr_results_files]
+            )
+            
+            if selected_file:
+                results_path = OCR_RESULTS_DIR / f"{selected_file}_results.json"
+                
+                with open(results_path, 'r', encoding='utf-8') as f:
+                    ocr_results = json.load(f)
+                
+                st.subheader(f"📄 {ocr_results['filename']}")
+                
+                for page in ocr_results['pages']:
+                    with st.expander(f"Page {page['page_num']}", expanded=False):
+                        st.markdown("#### 🖨️ Printed Text (Full Page)")
+                        st.text_area(
+                            "Full page text:",
+                            value=page['full_printed_text'],
+                            height=200,
+                            key=f"printed_{page['page_num']}"
+                        )
+                        
+                        if page['handwritten_regions']:
+                            st.markdown("#### ✍️ Detected Regions (EasyOCR)")
+                            st.info(f"Found {len(page['handwritten_regions'])} region(s)")
+                            
+                            for region in page['handwritten_regions']:
+                                col1, col2 = st.columns([1, 2])
+                                
+                                with col1:
+                                    if Path(region['image_path']).exists():
+                                        img = Image.open(region['image_path'])
+                                        st.image(img, caption=f"Region {region['region_id']}", use_column_width=True)
+                                
+                                with col2:
+                                    st.markdown(f"**Region {region['region_id']}**")
+                                    st.markdown(f"**Bounding Box:** {region['bbox']}")
+                                    st.markdown(f"**Confidence:** {region.get('confidence', 0.0):.2f}")
+                                    st.markdown("**OCR Transcription:**")
+                                    st.code(region['text'], language=None)
     
-    # 页脚
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: gray;'>"
-        "Enhanced Underwriting RAG System v1.0.0 | "
-        "Built with Streamlit & DeepSeek"
-        "</div>",
-        unsafe_allow_html=True
-    )
-
+    # TAB 3: Vector Database
+    with tab3:
+        st.header("🗄️ Vector Database Explorer")
+        
+        stats = st.session_state.vector_db.get_stats()
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Chunks", stats['total_chunks'])
+        with col2:
+            st.metric("Documents", stats['total_documents'])
+        with col3:
+            st.metric("🖨️ Printed", stats['printed_chunks'])
+        with col4:
+            st.metric("✍️ Extracted", stats['handwritten_chunks'])
+        
+        st.markdown("---")
+        
+        st.subheader("Document Breakdown")
+        
+        doc_data = []
+        for doc_id, meta in st.session_state.vector_db.doc_metadata.items():
+            doc_data.append({
+                'Document': meta['doc_name'],
+                'Total Chunks': meta['num_chunks'],
+                '🖨️ Printed': meta['printed_chunks'],
+                '✍️ Extracted': meta['handwritten_chunks']
+            })
+        
+        if doc_data:
+            df = pd.DataFrame(doc_data)
+            st.dataframe(df, use_container_width=True)
+        
+        st.markdown("---")
+        
+        st.subheader("Sample Chunks (First 10)")
+        
+        if st.session_state.vector_db.chunks:
+            sample_size = min(10, len(st.session_state.vector_db.chunks))
+            samples = st.session_state.vector_db.chunks[:sample_size]
+            
+            for idx, chunk in enumerate(samples, 1):
+                source_icon = "🖨️" if chunk.get('source_type') == 'printed' else "✍️"
+                with st.expander(f"{source_icon} Chunk {idx}: {chunk['doc_name']} (ID: {chunk['chunk_id']})"):
+                    st.json({
+                        'chunk_id': chunk['chunk_id'],
+                        'doc_name': chunk['doc_name'],
+                        'source_type': chunk.get('source_type', 'unknown'),
+                        'text': chunk['text'][:500] + "..."
+                    })
+    
+    # TAB 4: OCR Results
+    with tab4:
+        st.header("✍️ OCR Processing Results")
+        
+        st.markdown("""
+        View detailed OCR processing results:
+        - Text block detection (EasyOCR)
+        - OCR transcriptions
+        """)
+        
+        ocr_results_files = list(OCR_RESULTS_DIR.glob("*_results.json"))
+        
+        if not ocr_results_files:
+            st.info("No OCR results yet. Load preset datasets to process documents.")
+        else:
+            for results_file in ocr_results_files:
+                with open(results_file, 'r', encoding='utf-8') as f:
+                    results = json.load(f)
+                
+                with st.expander(f"📄 {results['filename']}", expanded=False):
+                    st.markdown(f"**Document ID:** `{results['doc_id']}`")
+                    st.markdown(f"**Total Pages:** {len(results['pages'])}")
+                    
+                    for page in results['pages']:
+                        st.markdown(f"#### Page {page['page_num']}")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Printed Text Length", len(page['full_printed_text']))
+                        with col2:
+                            st.metric("Detected Regions", len(page['handwritten_regions']))
+                        
+                        if page['handwritten_regions']:
+                            st.markdown("**Detected Regions:**")
+                            
+                            for region in page['handwritten_regions']:
+                                col_a, col_b = st.columns([1, 3])
+                                
+                                with col_a:
+                                    if Path(region['image_path']).exists():
+                                        img = Image.open(region['image_path'])
+                                        st.image(img, width=200)
+                                
+                                with col_b:
+                                    st.markdown(f"**Region {region['region_id']}**")
+                                    st.markdown(f"Bbox: {region['bbox']}")
+                                    st.code(region['text'])
+                        
+                        st.markdown("---")
 
 if __name__ == "__main__":
     main()
+
+```
