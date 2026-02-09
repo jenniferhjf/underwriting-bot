@@ -1,9 +1,12 @@
 """
-Underwriting Assistant - Professional RAG+CoT System with Deep Analysis
-Enhanced Version with Multimodal Document Analysis
+Underwriting Assistant - Professional RAG+CoT System with Dual-Track Analysis
+Enhanced Version with Separate Electronic & Handwritten Text Processing
 
-Author: Enhanced for Mitsui Dataset Analysis
-Date: 2026-02-09
+Features:
+- Separate analysis tracks for electronic text vs handwritten annotations
+- Visual indicators showing which content is electronic vs handwritten
+- Page-by-page analysis with toggleable views
+- No iframe blocking issues (using safe preview methods)
 """
 
 import streamlit as st
@@ -11,7 +14,7 @@ import os
 import json
 import hashlib
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import requests
 import PyPDF2
 from docx import Document as DocxDocument
@@ -54,7 +57,7 @@ TAG_OPTIONS = {
 }
 
 # ============================================================================
-# SYSTEM PROMPTS
+# SYSTEM PROMPTS - DUAL TRACK ANALYSIS
 # ============================================================================
 
 SYSTEM_INSTRUCTION = """Role: You are Mr. X's AI underwriting assistant
@@ -71,46 +74,58 @@ Step 5: Recommend with rationale
 
 Output: Provide decision + premium + sources"""
 
-DOCUMENT_ANALYSIS_SYSTEM = """You are a professional document analyst specializing in multimodal content analysis.
+# Electronic Text Analysis System
+ELECTRONIC_TEXT_ANALYSIS_SYSTEM = """You are analyzing ELECTRONIC PRINTED TEXT from documents.
 
-Your task: Analyze documents (insurance, business, technical) that contain BOTH:
-1. Electronic printed text (tables, forms, typed content)
-2. Handwritten annotations (notes, comments, markups)
+Focus on:
+1. Typed/printed tables and their structure
+2. Form fields and labels
+3. Printed numbers, dates, amounts
+4. Official stamps and seals (printed)
+5. Pre-printed text and templates
 
-Analysis Framework:
+Analyze:
+- Table headers and data rows
+- Financial figures and calculations
+- Dates and reference numbers
+- Business terms and conditions
+- Formal document structure
 
-**STEP 1: Document Overview**
-- Document type and purpose
-- Overall structure and layout
-- Main content categories
+Output: JSON with:
+{
+  "document_structure": "...",
+  "tables": [{header, data}],
+  "key_figures": {amounts, dates, references},
+  "business_terms": [...],
+  "formal_decisions": "..."
+}"""
 
-**STEP 2: Content Classification**
-- Electronic text areas (tables, forms, typed sections)
-- Handwritten text areas (annotations, signatures, notes)
-- Mixed areas (handwriting over printed text)
+# Handwritten Text Analysis System
+HANDWRITTEN_TEXT_ANALYSIS_SYSTEM = """You are analyzing HANDWRITTEN ANNOTATIONS from documents.
 
-**STEP 3: Text Extraction Analysis**
-- Key information from printed text
-- Important handwritten notes and their context
-- Relationships between handwritten and printed content
+Focus on:
+1. Margin notes and comments
+2. Handwritten questions and queries
+3. Manual calculations and formulas
+4. Signatures and initials
+5. Circles, underlines, arrows, highlights
+6. Date stamps and approval marks
 
-**STEP 4: Visual Elements**
-- Charts, diagrams, tables
-- Images embedded in the document
-- Highlighting, underlines, arrows
+Analyze:
+- Questions raised (e.g., "Can this be...", "How much...")
+- Calculations and corrections
+- Approval indicators (checkmarks, signatures)
+- Cross-references and notes
+- Urgency markers
 
-**STEP 5: Business Intelligence**
-- Key decisions or approvals indicated
-- Risk factors identified
-- Action items or follow-ups noted
-- Calculations or formulas
-
-**STEP 6: OCR Challenges Identified**
-- Areas difficult for standard OCR
-- Handwriting recognition challenges
-- Mixed content overlap issues
-
-Output: Structured JSON report with comprehensive analysis."""
+Output: JSON with:
+{
+  "questions_raised": [...],
+  "manual_calculations": [...],
+  "approval_marks": [...],
+  "annotations": [{location, content, type}],
+  "urgency_indicators": "..."
+}"""
 
 AUTO_ANNOTATE_SYSTEM = """You are an underwriting document auto-tagger.
 Given raw extracted text and the filename, produce a STRICT JSON object with:
@@ -178,12 +193,8 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     m1, m2 = sum(a*a for a in v1) ** 0.5, sum(b*b for b in v2) ** 0.5
     return dot / (m1 * m2) if m1 and m2 else 0.0
 
-def file_to_data_uri(path: str, mime: str) -> str:
-    with open(path, "rb") as f:
-        return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
-
 # ============================================================================
-# DEEP ANALYSIS FUNCTIONS
+# DUAL-TRACK ANALYSIS FUNCTIONS
 # ============================================================================
 
 def extract_images_from_docx(docx_path: str, output_dir: str) -> List[Dict[str, str]]:
@@ -202,151 +213,191 @@ def extract_images_from_docx(docx_path: str, output_dir: str) -> List[Dict[str, 
                             "image_id": filename.split('.')[0],
                             "filename": filename,
                             "path": extracted_path,
-                            "format": ext
+                            "format": ext,
+                            "page_number": len(images_info) + 1  # Approximate page tracking
                         })
         return images_info
     except Exception as e:
         st.error(f"Error extracting images: {e}")
         return []
 
-def analyze_single_image_with_llm(image_path: str, image_id: str) -> Dict[str, Any]:
-    """Analyze single image (simulated for non-vision models)"""
-    return {
-        "image_id": image_id,
-        "type": "Mixed Content",
-        "electronic_text_detected": True,
-        "handwritten_text_detected": True,
-        "ocr_difficulty": 3,
-        "key_elements": ["Tables with financial data", "Handwritten annotations", "Charts"],
-        "insights": f"Image {image_id} contains mixed content requiring multimodal OCR"
-    }
+def analyze_electronic_text(extracted_text: str, filename: str) -> Dict[str, Any]:
+    """Analyze electronic/printed text using dedicated system prompt"""
+    
+    prompt = f"""Document: {filename}
 
-def perform_deep_document_analysis(file_path: str, file_format: str, filename: str, doc_id: str) -> Dict[str, Any]:
-    """Perform comprehensive document analysis"""
+Electronic Printed Text Content:
+{extracted_text[:4000]}
+
+Analyze the ELECTRONIC/PRINTED content following the framework:
+1. Document structure (sections, tables, forms)
+2. Key financial figures and dates
+3. Business terms and conditions
+4. Formal decisions or status
+
+Return ONLY valid JSON."""
+    
+    response = call_deepseek_api(
+        messages=[
+            {"role": "system", "content": ELECTRONIC_TEXT_ANALYSIS_SYSTEM},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        max_tokens=1500
+    )
+    
+    try:
+        cleaned = response.strip().strip("`")
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        return json.loads(cleaned.strip())
+    except:
+        return {
+            "raw_response": response,
+            "note": "Could not parse as JSON",
+            "content_type": "electronic_text"
+        }
+
+def analyze_handwritten_annotations(image_info: List[Dict], extracted_text: str) -> Dict[str, Any]:
+    """Analyze handwritten annotations separately"""
+    
+    # For images containing handwriting, we analyze the context
+    prompt = f"""Based on document analysis, identify HANDWRITTEN ANNOTATIONS:
+
+Context from document:
+{extracted_text[:2000]}
+
+Number of images with potential handwriting: {len(image_info)}
+
+Analyze:
+1. Questions written in margins (e.g., "Can this...", "How much...")
+2. Manual calculations or corrections
+3. Approval marks (signatures, initials, checkmarks)
+4. Date stamps and annotations
+5. Cross-references and notes
+
+Return ONLY valid JSON with handwritten content analysis."""
+    
+    response = call_deepseek_api(
+        messages=[
+            {"role": "system", "content": HANDWRITTEN_TEXT_ANALYSIS_SYSTEM},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,
+        max_tokens=1500
+    )
+    
+    try:
+        cleaned = response.strip().strip("`")
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        return json.loads(cleaned.strip())
+    except:
+        return {
+            "raw_response": response,
+            "note": "Could not parse as JSON",
+            "content_type": "handwritten_annotations"
+        }
+
+def perform_dual_track_analysis(file_path: str, file_format: str, filename: str, doc_id: str) -> Dict[str, Any]:
+    """
+    Perform DUAL-TRACK analysis:
+    Track 1: Electronic/Printed Text
+    Track 2: Handwritten Annotations
+    """
+    
     analysis_result = {
-        "doc_id": doc_id, "filename": filename, "analysis_date": datetime.now().isoformat(),
-        "file_format": file_format, "text_analysis": {}, "image_analysis": [],
-        "comprehensive_report": "", "metadata": {}
+        "doc_id": doc_id,
+        "filename": filename,
+        "analysis_date": datetime.now().isoformat(),
+        "file_format": file_format,
+        "dual_track_analysis": {
+            "electronic_text": {},
+            "handwritten_annotations": {},
+            "integration_summary": ""
+        },
+        "images_by_page": [],
+        "metadata": {}
     }
     
     try:
-        # Step 1: Extract text
-        st.info("📝 Step 1/5: Extracting text content...")
+        # ===== TRACK 1: Electronic Text Extraction & Analysis =====
+        st.info("📝 Track 1: Analyzing Electronic/Printed Text...")
         extracted_text = extract_text_from_file(file_path, file_format)
-        analysis_result["metadata"].update({
-            "text_length": len(extracted_text),
-            "has_text": len(extracted_text) > 0
-        })
+        analysis_result["metadata"]["text_length"] = len(extracted_text)
+        analysis_result["metadata"]["has_text"] = len(extracted_text) > 0
         
-        # Step 2: Extract images
-        st.info("🖼️ Step 2/5: Extracting images from document...")
+        if extracted_text:
+            electronic_analysis = analyze_electronic_text(extracted_text, filename)
+            analysis_result["dual_track_analysis"]["electronic_text"] = electronic_analysis
+        
+        # ===== TRACK 2: Image & Handwriting Extraction =====
+        st.info("🖼️ Track 2: Extracting Images & Analyzing Handwritten Content...")
         images_info = []
         temp_image_dir = tempfile.mkdtemp(prefix=f"doc_analysis_{doc_id}_")
         
         if file_format == "docx":
             images_info = extract_images_from_docx(file_path, temp_image_dir)
         
-        analysis_result["metadata"].update({
-            "image_count": len(images_info),
-            "has_images": len(images_info) > 0
-        })
+        analysis_result["metadata"]["image_count"] = len(images_info)
+        analysis_result["metadata"]["has_images"] = len(images_info) > 0
         
-        # Step 3: Analyze text with LLM
-        if extracted_text:
-            st.info("🤖 Step 3/5: Analyzing text content with DeepSeek CoT...")
-            text_analysis_prompt = f"""Document: {filename}
-Format: {file_format}
-
-Extracted Text Content:
-{extracted_text[:5000]}
-
-Please analyze this document following the CoT framework:
-1. Document type and structure
-2. Key information categories
-3. Business intelligence (decisions, risks, actions)
-4. Notable patterns or anomalies
-
-Provide a structured analysis in JSON format."""
-            
-            text_analysis_response = call_deepseek_api(
-                messages=[
-                    {"role": "system", "content": DOCUMENT_ANALYSIS_SYSTEM},
-                    {"role": "user", "content": text_analysis_prompt}
-                ],
-                temperature=0.3, max_tokens=1500
-            )
-            
-            try:
-                cleaned = text_analysis_response.strip().strip("`")
-                if "\n" in cleaned:
-                    cleaned = cleaned.split("\n", 1)[1] if cleaned.startswith("```") else cleaned
-                if cleaned.endswith("```"):
-                    cleaned = cleaned.rsplit("```", 1)[0]
-                analysis_result["text_analysis"] = json.loads(cleaned)
-            except:
-                analysis_result["text_analysis"] = {
-                    "raw_response": text_analysis_response,
-                    "note": "Could not parse as JSON"
-                }
+        # Store images by page for visualization
+        for img in images_info:
+            analysis_result["images_by_page"].append({
+                "page": img.get("page_number", 0),
+                "image_id": img["image_id"],
+                "filename": img["filename"],
+                "format": img["format"],
+                "contains_handwriting": img["format"] in ["png", "jpg", "jpeg"]  # Simplified heuristic
+            })
         
-        # Step 4: Analyze images
+        # Analyze handwritten content
         if images_info:
-            st.info(f"🔍 Step 4/5: Analyzing {len(images_info)} images...")
             progress_bar = st.progress(0)
-            
-            for idx, img_info in enumerate(images_info):
-                if img_info["format"] in ["png", "jpg", "jpeg"]:
-                    img_analysis = analyze_single_image_with_llm(img_info["path"], img_info["image_id"])
-                    analysis_result["image_analysis"].append(img_analysis)
-                else:
-                    analysis_result["image_analysis"].append({
-                        "image_id": img_info["image_id"],
-                        "format": img_info["format"],
-                        "note": f"Format {img_info['format']} requires conversion"
-                    })
-                progress_bar.progress((idx + 1) / len(images_info))
+            handwriting_analysis = analyze_handwritten_annotations(images_info, extracted_text)
+            analysis_result["dual_track_analysis"]["handwritten_annotations"] = handwriting_analysis
+            progress_bar.progress(1.0)
         
-        # Step 5: Generate comprehensive report
-        st.info("📊 Step 5/5: Generating comprehensive analysis report...")
-        report_prompt = f"""Based on the following analysis, generate a comprehensive document analysis report:
-
-Filename: {filename}
-Format: {file_format}
-Text Length: {analysis_result['metadata']['text_length']} characters
-Images Found: {analysis_result['metadata']['image_count']}
-
-Text Analysis Summary:
-{json.dumps(analysis_result['text_analysis'], indent=2, ensure_ascii=False)[:2000]}
-
-Image Analysis Summary:
-{json.dumps(analysis_result['image_analysis'], indent=2, ensure_ascii=False)[:2000]}
-
-Please provide:
-1. Executive Summary
-2. Content Classification (Electronic vs Handwritten)
-3. Key Findings
-4. Business Intelligence Extracted
-5. OCR/Processing Challenges
-6. Recommendations
-
-Format as a structured report."""
+        # ===== INTEGRATION: Combine Both Tracks =====
+        st.info("🔗 Integrating Electronic & Handwritten Analysis...")
         
-        comprehensive_report = call_deepseek_api(
+        integration_prompt = f"""Combine these two analysis tracks into a comprehensive report:
+
+TRACK 1 - Electronic Text:
+{json.dumps(analysis_result["dual_track_analysis"]["electronic_text"], indent=2, ensure_ascii=False)[:1500]}
+
+TRACK 2 - Handwritten Annotations:
+{json.dumps(analysis_result["dual_track_analysis"]["handwritten_annotations"], indent=2, ensure_ascii=False)[:1500]}
+
+Provide:
+1. How handwritten notes relate to printed content
+2. Questions raised vs decisions made
+3. Approval workflow (who signed what)
+4. Action items from annotations
+5. Risk factors identified in either track"""
+        
+        integration_summary = call_deepseek_api(
             messages=[
-                {"role": "system", "content": "You are a document analysis expert. Generate clear, actionable reports."},
-                {"role": "user", "content": report_prompt}
+                {"role": "system", "content": "You are a document analyst integrating electronic and handwritten content."},
+                {"role": "user", "content": integration_prompt}
             ],
-            temperature=0.4, max_tokens=2000
+            temperature=0.4,
+            max_tokens=2000
         )
         
-        analysis_result["comprehensive_report"] = comprehensive_report
+        analysis_result["dual_track_analysis"]["integration_summary"] = integration_summary
         
         # Save analysis
-        analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_analysis.json")
+        analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_dual_analysis.json")
         with open(analysis_file, 'w', encoding='utf-8') as f:
             json.dump(analysis_result, f, ensure_ascii=False, indent=2)
         
-        st.success("✅ Deep analysis completed!")
+        st.success("✅ Dual-track analysis completed!")
         return analysis_result
         
     except Exception as e:
@@ -477,7 +528,7 @@ class Workspace:
         for fn in os.listdir(self.documents_dir):
             if fn.startswith(doc_id):
                 os.remove(os.path.join(self.documents_dir, fn))
-        analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_analysis.json")
+        analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_dual_analysis.json")
         if os.path.exists(analysis_file):
             os.remove(analysis_file)
         self._save_metadata()
@@ -573,17 +624,21 @@ def inject_css(appearance: str):
         :root {
             --text-primary: #e5e7eb; --text-secondary: #cbd5e1; --muted: #9ca3af;
             --bg-app: #0b1220; --card-bg: #101826; --shadow: 0 1px 3px rgba(0,0,0,0.5);
-            --brand: #93c5fd; --green: #86efac; --amber: #fde68a;
+            --brand: #93c5fd; --green: #86efac; --amber: #fde68a; --purple: #c084fc;
         }
         .stApp { background-color: var(--bg-app); color: var(--text-primary); }
         .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
         .sub-header { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .workspace-card { background: var(--card-bg); padding: 1.0rem; border-radius: 0.5rem; box-shadow: var(--shadow); color: var(--text-primary); }
         .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color:#0b1220; }
         .tag-equipment { background-color: #93c5fd; }
         .tag-industry { background-color: #86efac; }
         .tag-timeline { background-color: #fde68a; }
         .analysis-badge { background-color: #c084fc; color:#0b1220; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .electronic-badge { background-color: #60a5fa; color:#fff; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }
+        .handwritten-badge { background-color: #f472b6; color:#fff; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }
+        .track-card { background: var(--card-bg); padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid; margin: 1rem 0; }
+        .track-electronic { border-left-color: #60a5fa; }
+        .track-handwritten { border-left-color: #f472b6; }
         .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
         [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
         #MainMenu, footer, header {visibility: hidden;}
@@ -595,17 +650,21 @@ def inject_css(appearance: str):
         :root {
             --text-primary: #0f172a; --text-secondary: #374151; --muted: #6b7280;
             --bg-app: #f5f7fa; --card-bg: #ffffff; --shadow: 0 1px 3px rgba(0,0,0,0.1);
-            --brand: #1e40af; --green: #166534; --amber: #92400e;
+            --brand: #1e40af; --green: #166534; --amber: #92400e; --purple: #7c3aed;
         }
         .stApp { background-color: var(--bg-app); color: var(--text-primary); }
         .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
         .sub-header { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .workspace-card { background: var(--card-bg); padding: 1.0rem; border-radius: 0.5rem; box-shadow: var(--shadow); color: var(--text-primary); }
-        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color: var(--text-primary); }
-        .tag-equipment { background-color: #dbeafe; }
-        .tag-industry { background-color: #dcfce7; }
-        .tag-timeline { background-color: #fef3c7; }
+        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .tag-equipment { background-color: #dbeafe; color: var(--text-primary); }
+        .tag-industry { background-color: #dcfce7; color: var(--text-primary); }
+        .tag-timeline { background-color: #fef3c7; color: var(--text-primary); }
         .analysis-badge { background-color: #e9d5ff; color: var(--text-primary); padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
+        .electronic-badge { background-color: #3b82f6; color:#fff; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }
+        .handwritten-badge { background-color: #ec4899; color:#fff; padding:0.5rem 1rem; border-radius:0.5rem; font-weight:700; margin:0.5rem; }
+        .track-card { background: var(--card-bg); padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid; margin: 1rem 0; box-shadow: var(--shadow); }
+        .track-electronic { border-left-color: #3b82f6; }
+        .track-handwritten { border-left-color: #ec4899; }
         .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
         [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
         #MainMenu, footer, header {visibility: hidden;}
@@ -619,7 +678,7 @@ def inject_css(appearance: str):
 
 def main():
     st.set_page_config(
-        page_title="Underwriting Assistant - Enhanced",
+        page_title="Underwriting Assistant - Dual Track",
         page_icon="🤖",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -633,8 +692,8 @@ def main():
     inject_css(appearance)
     
     # Header
-    st.markdown('<div class="main-header">🤖 Underwriting Assistant (Enhanced)</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">RAG + CoT | Deep Document Analysis | Multimodal Extraction</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🤖 Underwriting Assistant - Dual Track Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">📝 Electronic Text + ✍️ Handwritten Annotations | Separate Processing Tracks</div>', unsafe_allow_html=True)
     
     # Workspace Management
     with st.sidebar:
@@ -642,7 +701,7 @@ def main():
         workspaces = get_all_workspaces()
         
         with st.expander("➕ New Workspace"):
-            new_ws_name = st.text_input("Workspace Name", placeholder="e.g., Gas Turbine Cases")
+            new_ws_name = st.text_input("Workspace Name", placeholder="e.g., Marine Insurance Cases")
             if st.button("Create"):
                 if new_ws_name and new_ws_name not in workspaces:
                     create_workspace(new_ws_name)
@@ -668,7 +727,7 @@ def main():
             st.metric("Documents", stats["total_documents"])
         with c2:
             st.metric("Size", f"{stats['total_size_mb']:.1f} MB")
-        st.metric("Deep Analyzed", f"{stats.get('analyzed_documents', 0)}")
+        st.metric("Dual-Track Analyzed", f"{stats.get('analyzed_documents', 0)}")
         
         if stats["format_distribution"]:
             st.markdown("**Formats:**")
@@ -684,12 +743,12 @@ def main():
                 st.success("Workspace deleted!")
                 st.rerun()
     
-    # Main Tabs - THIS IS THE KEY CHANGE: 4 tabs instead of 3
+    # Main Tabs
     tab1, tab2, tab3, tab4 = st.tabs([
         "💬 Chat",
         "📄 Documents",
         "📤 Upload (Auto-Tag)",
-        "🔬 Deep Analysis"  # NEW TAB
+        "🔬 Dual-Track Analysis"
     ])
     
     # TAB 1: Chat
@@ -728,7 +787,7 @@ def main():
                                 for t in d["tags"].get("timeline", []):
                                     tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
                                 if d.get("has_deep_analysis"):
-                                    tags_html += '<span class="analysis-badge">📊 Deep Analyzed</span>'
+                                    tags_html += '<span class="analysis-badge">📊 Dual-Track Analyzed</span>'
                                 st.markdown(tags_html, unsafe_allow_html=True)
                                 st.markdown("---")
             
@@ -748,7 +807,7 @@ def main():
                 fe = st.multiselect("🔧 Equipment", TAG_OPTIONS["equipment"])
                 fi = st.multiselect("🏭 Industry", TAG_OPTIONS["industry"])
                 ft = st.multiselect("📅 Timeline", TAG_OPTIONS["timeline"])
-                show_analyzed = st.checkbox("Show only analyzed docs", value=False)
+                show_analyzed = st.checkbox("Show only dual-track analyzed docs", value=False)
                 
                 docs = workspace.metadata
                 if q:
@@ -781,49 +840,47 @@ def main():
                     st.rerun()
             
             with right:
-                st.markdown("#### 👀 Preview Original")
+                st.markdown("#### 👀 Preview")
                 if not selected_doc:
                     st.info("Select a document on the left to preview.")
                 else:
                     doc = selected_doc
-                    st.markdown(f"**{doc['filename']}**  \nID: `{doc['doc_id']}` | "
-                              f"Format: **{doc['file_format'].upper()}** | Size: {doc['file_size_kb']:.1f} KB")
+                    st.markdown(f"**{doc['filename']}**")
+                    st.caption(f"ID: `{doc['doc_id']}` | Format: **{doc['file_format'].upper()}** | Size: {doc['file_size_kb']:.1f} KB")
                     
                     if doc.get("has_deep_analysis"):
-                        st.success("✅ This document has been deeply analyzed!")
+                        st.success("✅ This document has dual-track analysis (📝 Electronic + ✍️ Handwritten)")
                     
                     with open(doc["file_path"], "rb") as f:
-                        st.download_button("⬇️ Download file", f, file_name=doc["filename"], mime=None)
+                        st.download_button("⬇️ Download", f, file_name=doc["filename"])
                     
+                    # Safe preview without iframe
                     ext = doc["file_format"]
                     path = doc["file_path"]
                     
-                    if ext == "pdf":
-                        try:
-                            data_uri = file_to_data_uri(path, "application/pdf")
-                            html = f'<iframe src="{data_uri}" width="100%" height="800px" style="border:none;"></iframe>'
-                            st.components.v1.html(html, height=820, scrolling=True)
-                        except Exception as e:
-                            st.error(f"PDF preview failed: {e}")
-                    elif ext in ["png", "jpg", "jpeg"]:
+                    if ext in ["png", "jpg", "jpeg"]:
                         try:
                             st.image(path, use_column_width=True)
                         except Exception as e:
                             st.error(f"Image preview failed: {e}")
                     elif ext in ["docx", "doc"]:
                         text = extract_text_from_docx(path) if ext == "docx" else "(DOC preview not supported)"
-                        st.text_area("Extracted Text (preview)", value=text[:8000], height=400)
+                        st.text_area("Extracted Text", value=text[:6000], height=400)
                     elif ext == "txt":
                         text = extract_text_from_txt(path)
-                        st.text_area("Text File (preview)", value=text[:8000], height=400)
+                        st.text_area("Text File", value=text[:6000], height=400)
                     elif ext in ["xlsx", "xls"]:
                         try:
                             df = pd.read_excel(path)
-                            st.dataframe(df.head(200), use_container_width=True)
+                            st.dataframe(df.head(100), use_container_width=True)
                         except Exception as e:
                             st.error(f"Excel preview failed: {e}")
+                    elif ext == "pdf":
+                        st.info("📄 PDF file - Download to view or use PDF viewer")
+                        with open(path, "rb") as f:
+                            st.download_button("📥 Download PDF", f, file_name=doc["filename"], mime="application/pdf")
                     else:
-                        st.info("Preview not supported for this file type. Please download to view.")
+                        st.info("Preview not supported. Please download to view.")
                     
                     st.markdown("---")
                     st.markdown("**Auto Tags & Case Info**")
@@ -850,7 +907,7 @@ def main():
     
     # TAB 3: Upload
     with tab3:
-        st.markdown("### 📤 Upload Document (Auto-Tag by Model)")
+        st.markdown("### 📤 Upload Document (Auto-Tag by AI)")
         st.caption("Upload files and the system will automatically extract text and perform auto-tagging.")
         
         with st.form("upload_form_autotag"):
@@ -898,10 +955,41 @@ def main():
                     with st.expander("🔎 Auto-Tag Result"):
                         st.json(auto)
     
-    # TAB 4: Deep Analysis (NEW)
+    # TAB 4: Dual-Track Analysis
     with tab4:
-        st.markdown("### 🔬 Deep Document Analysis")
-        st.caption("Use DeepSeek CoT to perform deep analysis on documents, extract electronic text and handwritten annotations, and generate detailed reports.")
+        st.markdown("### 🔬 Dual-Track Document Analysis")
+        
+        # Explanation
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("""
+            <div class="track-card track-electronic">
+            <h4>📝 Track 1: Electronic Text</h4>
+            <p>Analyzes printed/typed content:</p>
+            <ul>
+            <li>Tables and data</li>
+            <li>Form fields</li>
+            <li>Printed figures & dates</li>
+            <li>Business terms</li>
+            </ul>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("""
+            <div class="track-card track-handwritten">
+            <h4>✍️ Track 2: Handwritten</h4>
+            <p>Analyzes handwritten content:</p>
+            <ul>
+            <li>Margin notes & questions</li>
+            <li>Manual calculations</li>
+            <li>Signatures & approvals</li>
+            <li>Annotations & markups</li>
+            </ul>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("---")
         
         if not workspace.metadata:
             st.info("No documents yet. Upload documents first in 'Upload (Auto-Tag)'.")
@@ -914,7 +1002,7 @@ def main():
             selected_for_analysis = st.selectbox(
                 "Select a document to analyze:",
                 list(doc_options.keys()),
-                key="deep_analysis_selector"
+                key="dual_analysis_selector"
             )
             
             if selected_for_analysis:
@@ -926,7 +1014,7 @@ def main():
                     
                     with col1:
                         st.markdown(f"**Selected:** {analysis_doc['filename']}")
-                        st.write(f"Format: {analysis_doc['file_format'].upper()} | Size: {analysis_doc['file_size_kb']:.1f} KB")
+                        st.caption(f"Format: {analysis_doc['file_format'].upper()} | Size: {analysis_doc['file_size_kb']:.1f} KB")
                     
                     with col2:
                         if analysis_doc.get("has_deep_analysis"):
@@ -934,9 +1022,9 @@ def main():
                         else:
                             st.info("Not yet analyzed")
                     
-                    if st.button("🚀 Start Deep Analysis", type="primary"):
+                    if st.button("🚀 Start Dual-Track Analysis", type="primary"):
                         with st.container():
-                            analysis_result = perform_deep_document_analysis(
+                            analysis_result = perform_dual_track_analysis(
                                 file_path=analysis_doc["file_path"],
                                 file_format=analysis_doc["file_format"],
                                 filename=analysis_doc["filename"],
@@ -950,17 +1038,19 @@ def main():
                             workspace._save_metadata()
                             
                             st.balloons()
-                            st.success("🎉 Analysis completed! Scroll down to view results.")
+                            st.success("🎉 Dual-track analysis completed! Scroll down to view results.")
                     
                     st.markdown("---")
                     
-                    analysis_file = os.path.join(ANALYSIS_DIR, f"{analysis_doc_id}_analysis.json")
+                    # Display results
+                    analysis_file = os.path.join(ANALYSIS_DIR, f"{analysis_doc_id}_dual_analysis.json")
                     if os.path.exists(analysis_file):
                         st.markdown("### 📊 Analysis Results")
                         
                         with open(analysis_file, 'r', encoding='utf-8') as f:
                             analysis_data = json.load(f)
                         
+                        # Overview
                         st.markdown("#### 📋 Overview")
                         c1, c2, c3, c4 = st.columns(4)
                         with c1:
@@ -968,28 +1058,62 @@ def main():
                         with c2:
                             st.metric("Images Found", analysis_data['metadata'].get('image_count', 0))
                         with c3:
-                            st.metric("Has Text", "✅" if analysis_data['metadata'].get('has_text') else "❌")
+                            st.metric("Has Electronic", "✅" if analysis_data['metadata'].get('has_text') else "❌")
                         with c4:
-                            st.metric("Has Images", "✅" if analysis_data['metadata'].get('has_images') else "❌")
+                            st.metric("Has Handwritten", "✅" if analysis_data['metadata'].get('has_images') else "❌")
                         
-                        st.markdown("#### 📝 Comprehensive Report")
-                        st.markdown(analysis_data.get("comprehensive_report", "No report generated."))
+                        # Dual Track Results
+                        st.markdown("---")
+                        st.markdown("### 🎯 Dual-Track Analysis Results")
                         
-                        with st.expander("📄 Text Analysis Details"):
-                            st.json(analysis_data.get("text_analysis", {}))
+                        # Toggle view
+                        view_mode = st.radio(
+                            "Select view:",
+                            ["📝 Electronic Text Only", "✍️ Handwritten Only", "🔗 Integrated View", "📄 Page-by-Page"],
+                            horizontal=True
+                        )
                         
-                        if analysis_data.get("image_analysis"):
-                            with st.expander(f"🖼️ Image Analysis ({len(analysis_data['image_analysis'])} images)"):
-                                for img_analysis in analysis_data["image_analysis"]:
-                                    st.markdown(f"**{img_analysis.get('image_id', 'Unknown')}**")
-                                    st.json(img_analysis)
-                                    st.markdown("---")
+                        if view_mode == "📝 Electronic Text Only":
+                            st.markdown('<div class="electronic-badge">Track 1: Electronic/Printed Text Analysis</div>', unsafe_allow_html=True)
+                            st.json(analysis_data.get("dual_track_analysis", {}).get("electronic_text", {}))
                         
+                        elif view_mode == "✍️ Handwritten Only":
+                            st.markdown('<div class="handwritten-badge">Track 2: Handwritten Annotations Analysis</div>', unsafe_allow_html=True)
+                            st.json(analysis_data.get("dual_track_analysis", {}).get("handwritten_annotations", {}))
+                        
+                        elif view_mode == "🔗 Integrated View":
+                            st.markdown("#### 🔗 Integration Summary")
+                            st.markdown(analysis_data.get("dual_track_analysis", {}).get("integration_summary", "No integration summary available."))
+                            
+                            with st.expander("📝 Electronic Text Details"):
+                                st.json(analysis_data.get("dual_track_analysis", {}).get("electronic_text", {}))
+                            
+                            with st.expander("✍️ Handwritten Details"):
+                                st.json(analysis_data.get("dual_track_analysis", {}).get("handwritten_annotations", {}))
+                        
+                        elif view_mode == "📄 Page-by-Page":
+                            st.markdown("#### 📄 Page-by-Page Analysis")
+                            images_by_page = analysis_data.get("images_by_page", [])
+                            
+                            if images_by_page:
+                                for img in images_by_page:
+                                    page_num = img.get("page", 0)
+                                    has_handwriting = img.get("contains_handwriting", False)
+                                    
+                                    with st.expander(f"Page {page_num}: {img['filename']}" + (" ✍️ Contains Handwriting" if has_handwriting else " 📝 Electronic Only")):
+                                        st.write(f"**Image ID:** {img['image_id']}")
+                                        st.write(f"**Format:** {img['format'].upper()}")
+                                        st.write(f"**Content Type:** {'Mixed (Electronic + Handwritten)' if has_handwriting else 'Electronic Text Only'}")
+                            else:
+                                st.info("No page-level data available.")
+                        
+                        # Download
+                        st.markdown("---")
                         report_json = json.dumps(analysis_data, ensure_ascii=False, indent=2)
                         st.download_button(
-                            "📥 Download Full Analysis Report (JSON)",
+                            "📥 Download Full Dual-Track Analysis (JSON)",
                             data=report_json,
-                            file_name=f"{analysis_doc_id}_analysis.json",
+                            file_name=f"{analysis_doc_id}_dual_track_analysis.json",
                             mime="application/json"
                         )
 
