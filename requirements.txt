@@ -1,9 +1,32 @@
-streamlit==1.32.0
-requests==2.31.0
-PyMuPDF==1.23.8
-python-docx==1.1.0
-pandas==2.2.0
-numpy==1.26.3
-faiss-cpu==1.7.4
-openpyxl==3.1.2
+# Enhanced Underwriting RAG System - Requirements
+# Minimal version for GitHub deployment
 
+# Core framework
+streamlit==1.32.0
+python-dotenv==1.0.1
+
+# Document processing
+PyPDF2==3.0.1
+python-docx==1.1.0
+Pillow==10.2.0
+
+# OCR (choose one based on your needs)
+pytesseract==0.3.10  # Lightweight, requires tesseract installation
+# easyocr==1.7.1  # Uncomment for EasyOCR
+# transformers==4.38.2  # Uncomment for TrOCR
+# torch==2.2.1  # Uncomment for TrOCR
+
+# Embeddings
+sentence-transformers==2.5.1  # For local embeddings
+openai==1.14.0  # For DeepSeek API (compatible)
+
+# Vector store
+faiss-cpu==1.8.0
+numpy==1.26.4
+
+# Data processing
+pandas==2.2.1
+plotly==5.19.0
+
+# HTTP client
+requests==2.31.0
