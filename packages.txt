@@ -2,3 +2,4 @@ poppler-utils
 tesseract-ocr
 tesseract-ocr-chi-sim
 libgl1
+build-essential
