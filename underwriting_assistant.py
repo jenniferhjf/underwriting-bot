@@ -1,29 +1,3 @@
-The `ModuleNotFoundError: No module named 'cv2'` occurs because Streamlit Cloud environments do not include the system-level graphics libraries required by standard OpenCV. While this can usually be fixed by using `opencv-python-headless`, replacing it with **Pillow (PIL)** is a much more robust and "Python-native" solution for Streamlit, as it requires no external system dependencies.
-
-Here is the **complete, modified code**.
-
-### Key Changes Made:
-
-1. **Removed `cv2**`: Eliminated all OpenCV dependencies.
-2. **Switched to Pillow (PIL)**: Used for all image loading and manipulation.
-3. **Refactored OCR Logic**: Instead of using OpenCV to find contours (which is brittle), I now use **EasyOCR's built-in detection**. EasyOCR effectively does the "handwriting detection" for us.
-4. **Data Consistency**: The code adapts the EasyOCR output to match the data structure your UI expects (bounding boxes, region IDs), so your "Document Viewer" tab still works perfectly.
-
-```python
-"""
-Professional Underwriting RAG System with Handwriting Recognition
-=================================================================
-
-Complete Pipeline:
-1. Load preset datasets
-2. OCR processing (Hybrid Tesseract + EasyOCR)
-3. Text chunking with overlap
-4. Embedding generation
-5. Vector database indexing
-6. Semantic search with reranking
-7. LLM-powered question answering
-"""
-
 import streamlit as st
 import os
 import json
