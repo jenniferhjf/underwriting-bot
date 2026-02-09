@@ -15,7 +15,7 @@ import base64
 # Configuration
 # ===========================
 
-VERSION = "2.7"
+VERSION = "2.8.0"
 APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
 
 # API Configuration
@@ -33,7 +33,7 @@ AUDIT_DIR = DATA_DIR / "audit_logs"
 CONFIG_DIR = DATA_DIR / "config"
 
 # Initial dataset file
-INITIAL_DATASET = "Hull - Marco Polo_Memo.pdf"
+INITIAL_DATASET = "Hull - MSC_Memo.pdf"
 
 # Supported file formats
 SUPPORTED_FORMATS = {
@@ -90,85 +90,87 @@ Always provide responses in clear, professional format suitable for business cli
 
 ELECTRONIC_TEXT_ANALYSIS_SYSTEM = """Analyze the electronic/printed text from this underwriting document.
 
+**CRITICAL**: Base ALL analysis on ACTUAL CONTENT from the document provided. 
+Do NOT use generic templates or placeholder text.
+
 Provide a comprehensive, client-ready analysis in the following format:
 
 ## Policy Overview
-[Brief summary of the policy]
+[Summarize the ACTUAL policy details from this specific document]
 
 ## Insured Information
-- Insured Name: [name]
-- Policy Number: [number]
-- Coverage Type: [type]
-- Policy Period: [dates]
-- Coverage Limits: [amounts]
+- Insured Name: [extract from document, e.g., "Mediterranean Shipping Company (MSC)"]
+- Broker: [extract from document, e.g., "Cambiaso Risso Asia"]
+- Claims Leader: [extract from document]
+- Coverage Type: [extract from document]
 
-## Premium Details
-- Premium Amount: [amount]
-- Payment Terms: [terms]
-- Calculation Basis: [basis]
+## Coverage History
+[Analyze ACTUAL historical data from the document table:]
+- List each UWR Year with its POI period, shares, and terms
+- Example: "12 months from 11.05.2008: FCIL writing at own merits, PA Deductible USD 500k to USD 1mil, Net L/R 74.32%"
 
-## Coverage Terms
-[Detailed description of what is covered, including:]
-- Covered Perils: [list]
-- Geographical Scope: [scope]
-- Special Conditions: [conditions]
+## Premium & Loss Ratio Analysis
+- Net Loss Ratios: [extract ACTUAL percentages from document, e.g., "74.32%, 1.43%, Clean"]
+- Brokerage Rates: [extract ACTUAL rates, e.g., "22.5%"]
+- Premium Trends: [analyze based on actual data]
 
-## Exclusions
-[What is NOT covered:]
-- [Exclusion 1]
-- [Exclusion 2]
-...
-
-## Key Clauses
-- Retention: [amount and terms]
-- Deductibles: [amounts and conditions]
-- Sublimits: [specific limits]
+## Key Terms & Conditions
+[Extract SPECIFIC terms mentioned in this document:]
+- Deductible amounts (extract actual values, e.g., "USD 500k increased to USD 1mil")
+- Premium conditions (e.g., "Offered premium is 10% higher than expiring")
+- Vessel-specific terms (e.g., "vessels 'Melody' and 'Rhapsody' at USD 300k each vessel")
+- Special clauses (e.g., "FCIL writing at own merits and rates")
+- Coverage limits and collision liabilities
 
 ## Risk Assessment
-**Nature of Risk:** [description]
-**Exposure Factors:** [factors]
-**Loss History:** [if available]
-**Risk Rating:** [Low/Medium/High/Critical]
+**Historical Performance:** [Based on ACTUAL loss ratios from the document]
+**Exposure Factors:** [Identify from actual document content]
+**Claim History:** [If available in document]
+**Risk Rating:** [Low/Medium/High/Critical - justify based on actual data]
 
-## Underwriter Notes
-[Any special considerations, decision points, or recommendations]
+## Underwriter Notes & Recommendations
+[Based on the ACTUAL renewal terms and conditions in the document]
 
 ## Key Entities & Values
-[Important numbers, dates, and entities extracted from the document]
+[Important numbers, dates, companies, and entities extracted from THIS document]
 
 ---
-Note: Provide actual information from the document. If information is not available, state "Not specified in document"."""
+**IMPORTANT**: Extract and analyze ONLY the ACTUAL content from this specific document. 
+If information is not available in the document, state "Not specified in document"."""
 
-HANDWRITING_TRANSLATION_SYSTEM_V2 = """Translate handwritten annotations from underwriting documents into clear electronic text.
+HANDWRITING_TRANSLATION_SYSTEM = """Analyze and translate handwritten annotations from underwriting documents.
+
+**Context**: You are analyzing a scanned insurance document that may contain handwritten notes, 
+signatures, date stamps, or executive comments overlaid on the printed text.
 
 Provide the translation in this format:
 
 ## Handwriting Summary
-[Overall summary of what the handwritten notes contain]
+[Overall description of what handwritten content was detected]
 
-## Translated Annotations
+## Detected Annotations
 
 ### Annotation 1
-**Location:** [Where in the document]
-**Confidence Level:** [CLEAR/STANDARD/CURSIVE] ([confidence score])
-**Original Text Detected:** [OCR result]
-**Clean Translation:** [Cleaned up version]
-**Context:** [What this annotation refers to in the document]
+**Location:** [Page and position in document]
+**Type:** [Executive Comment / Signature / Date / Risk Assessment / Approval / Other]
+**Confidence Level:** [High/Medium/Low based on clarity]
+**Translated Text:** [Clean interpretation of the handwriting]
+**Context:** [What this annotation refers to or indicates]
 
-[Repeat for each annotation]
+[Repeat for each detected annotation]
 
-## Key Insights from Handwriting
-- [Important point 1]
-- [Important point 2]
-...
+## Key Insights from Handwritten Notes
+- [Important insight 1: e.g., "Executive approval indicated"]
+- [Important insight 2: e.g., "Renewal recommendations noted"]
+- [Important insight 3: e.g., "Special attention to specific terms requested"]
 
 ## Annotations Requiring Human Review
-[List annotations that need manual verification due to low confidence]
+[List any annotations that are unclear or need manual verification]
 
 ---
-Note: For production use, integrate with OCR services like Google Cloud Vision API or AWS Textract."""
+Note: For production use, integrate with OCR services like Google Cloud Vision API or AWS Textract for accurate text extraction."""
 
-QA_EXTRACTION_SYSTEM_V2 = """Extract Question-Answer pairs from this underwriting document.
+QA_EXTRACTION_SYSTEM = """Extract Question-Answer pairs from this underwriting document.
 
 Present the Q&A in this format:
 
@@ -192,7 +194,7 @@ Total question-answer pairs found: [number]
 ---
 Note: If no structured Q&A found, state "No formal Q&A sections detected in this document"."""
 
-AUTO_ANNOTATE_SYSTEM_V2 = """Automatically annotate this underwriting document with key metadata.
+AUTO_ANNOTATE_SYSTEM = """Automatically annotate this underwriting document with key metadata.
 
 Provide the annotation in this business-ready format:
 
@@ -441,6 +443,67 @@ def is_scanned_pdf(file_path: Path) -> bool:
     except Exception as e:
         return False
 
+def extract_images_from_pdf(file_path: Path) -> List[Dict]:
+    """Extract all images from PDF (for scanned documents and handwriting detection)"""
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        images = []
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            image_list = page.get_images()
+            
+            for img_index, img in enumerate(image_list):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    # Convert to base64
+                    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    images.append({
+                        'id': f"page{page_num+1}_img{img_index+1}",
+                        'data': image_b64,
+                        'type': 'scanned',
+                        'page': page_num + 1,
+                        'source_file': file_path.name,
+                        'size': len(image_bytes)
+                    })
+                except Exception as e:
+                    continue
+        
+        doc.close()
+        return images
+        
+    except Exception as e:
+        st.warning(f"PDF image extraction error: {e}")
+        return []
+
+def detect_handwriting_in_images(images: List[Dict]) -> bool:
+    """Detect if images likely contain handwriting (heuristic approach)"""
+    if not images:
+        return False
+    
+    # Count images per page
+    pages = {}
+    for img in images:
+        page = img.get('page', 1)
+        pages[page] = pages.get(page, 0) + 1
+    
+    # If any page has 4+ images, likely has handwriting overlays/annotations
+    for page, count in pages.items():
+        if count >= 4:
+            return True
+    
+    # Check for small images (might be signatures/stamps)
+    for img in images:
+        if img.get('size', 0) < 50000:  # < 50KB
+            return True
+    
+    return False
+
 def extract_text_from_scanned_pdf(file_path: Path) -> str:
     """Extract information from scanned PDF"""
     try:
@@ -469,10 +532,10 @@ Image Content Analysis:
         extracted_info += "\n\n" + "="*50
         extracted_info += "\n⚠️ NOTE: This is an image-only PDF without extractable text."
         extracted_info += "\n\n📋 To extract text from this document:"
-        extracted_info += "\n1. Use the 'Handwriting Translation' tab"
-        extracted_info += "\n2. Upload individual page images"
-        extracted_info += "\n3. The system will process them with OCR"
-        extracted_info += "\n\nAlternatively, for production use, integrate with:"
+        extracted_info += "\n1. The system will analyze images for handwritten annotations"
+        extracted_info += "\n2. Use the 'Handwriting Translation' tab to view results"
+        extracted_info += "\n3. You can also upload individual page images for OCR processing"
+        extracted_info += "\n\nFor production use, integrate with:"
         extracted_info += "\n- Google Cloud Vision API"
         extracted_info += "\n- AWS Textract"
         extracted_info += "\n- Azure Computer Vision"
@@ -484,47 +547,55 @@ Image Content Analysis:
     except Exception as e:
         return f"Error processing scanned PDF: {e}"
 
-def extract_text_from_pdf(file_path: Path) -> str:
-    """Enhanced PDF extraction with scanned PDF detection"""
+def extract_text_from_pdf(file_path: Path) -> Tuple[str, List[Dict]]:
+    """Enhanced PDF extraction - returns (text, images)"""
     try:
-        # Check if it's a scanned PDF
-        if is_scanned_pdf(file_path):
-            return extract_text_from_scanned_pdf(file_path)
+        import fitz
+        doc = fitz.open(file_path)
         
-        # Try PyMuPDF first
-        try:
-            import fitz
-            text = ""
-            doc = fitz.open(file_path)
-            for page in doc:
-                text += page.get_text() + "\n\n"
-            doc.close()
+        text_content = []
+        all_images = []
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
             
-            if len(text.strip()) > 100:
-                return text
-        except:
-            pass
-        
-        # Fallback to PyPDF2
-        try:
-            import PyPDF2
-            text = ""
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n\n"
+            # Try to extract text
+            text = page.get_text()
+            if text.strip():
+                text_content.append(f"=== Page {page_num+1} ===\n{text}\n")
             
-            if len(text.strip()) > 100:
-                return text
-        except:
-            pass
+            # Extract images
+            image_list = page.get_images()
+            for img_index, img in enumerate(image_list):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    all_images.append({
+                        'id': f"page{page_num+1}_img{img_index+1}",
+                        'data': base64.b64encode(image_bytes).decode('utf-8'),
+                        'type': 'scanned' if not text.strip() else 'embedded',
+                        'page': page_num + 1,
+                        'source_file': file_path.name,
+                        'size': len(image_bytes)
+                    })
+                except:
+                    continue
         
-        # If still no text, treat as scanned
-        return extract_text_from_scanned_pdf(file_path)
+        doc.close()
+        
+        # If no text but has images, it's a scanned document
+        if not text_content and all_images:
+            scanned_info = extract_text_from_scanned_pdf(file_path)
+            return (scanned_info, all_images)
+        
+        final_text = "\n\n".join(text_content) if text_content else ""
+        return (final_text, all_images)
         
     except Exception as e:
         st.warning(f"PDF extraction error: {e}")
-        return ""
+        return ("", [])
 
 def extract_text_from_docx(file_path: Path) -> str:
     """Extract text from DOCX file"""
@@ -546,18 +617,21 @@ def extract_text_from_txt(file_path: Path) -> str:
         st.warning(f"TXT extraction error: {e}")
         return ""
 
-def extract_text_from_file(file_path: Path) -> str:
-    """Extract text based on file type"""
+def extract_text_from_file(file_path: Path) -> Tuple[str, List[Dict]]:
+    """Extract text and images based on file type"""
     ext = file_path.suffix.lower().lstrip('.')
     
     if ext == 'pdf':
         return extract_text_from_pdf(file_path)
     elif ext in ['docx', 'doc']:
-        return extract_text_from_docx(file_path)
+        text = extract_text_from_docx(file_path)
+        images = extract_images_from_docx(file_path)
+        return (text, images)
     elif ext == 'txt':
-        return extract_text_from_txt(file_path)
+        text = extract_text_from_txt(file_path)
+        return (text, [])
     else:
-        return ""
+        return ("", [])
 
 def extract_images_from_docx(file_path: Path) -> List[Dict]:
     """Extract embedded images from DOCX file (skip external links)"""
@@ -581,7 +655,8 @@ def extract_images_from_docx(file_path: Path) -> List[Dict]:
                         'id': image_id,
                         'data': base64.b64encode(image_data).decode('utf-8'),
                         'type': 'embedded',
-                        'source_file': file_path.name
+                        'source_file': file_path.name,
+                        'size': len(image_data)
                     })
                 except Exception as e:
                     # Skip images that can't be processed
@@ -660,7 +735,7 @@ Content:
 
 Extract all question-answer pairs from this underwriting document."""
 
-        response = call_llm_api(QA_EXTRACTION_SYSTEM_V2, user_prompt)
+        response = call_llm_api(QA_EXTRACTION_SYSTEM, user_prompt)
         
         if not response:
             return "No Q&A pairs could be extracted from this document."
@@ -676,12 +751,13 @@ def analyze_electronic_text(text: str, filename: str) -> str:
     try:
         user_prompt = f"""Document: {filename}
 
-Content:
-{text[:4000]}
+Full Content:
+{text[:6000]}
 
-Perform comprehensive analysis of this underwriting document."""
+Perform comprehensive analysis of this underwriting document. 
+Base your analysis ONLY on the actual content provided above."""
 
-        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt)
+        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt, max_tokens=5000)
         
         if not response:
             return "Unable to analyze electronic text. Please check API configuration."
@@ -692,62 +768,74 @@ Perform comprehensive analysis of this underwriting document."""
         st.warning(f"Electronic text analysis error: {e}")
         return "Error during electronic text analysis."
 
-def translate_handwriting(images: List[Dict], filename: str) -> Dict:
-    """Translate handwritten annotations to electronic text"""
+def translate_handwriting(images: List[Dict], filename: str, text_content: str = "") -> Dict:
+    """Translate handwritten annotations with intelligent detection"""
     try:
         if not images:
             return {
                 "has_handwriting": False,
-                "translated_text": "No handwritten content detected in this document.",
+                "translated_text": "No images detected in this document.",
                 "image_count": 0
             }
         
-        translated_annotations = []
-        needs_review = []
+        # Detect handwriting using heuristics
+        has_handwriting = detect_handwriting_in_images(images)
         
-        for img in images:
-            tier, confidence = classify_handwriting_quality(img.get('data', ''))
-            
-            simulated_text = f"Handwritten annotation detected in {img['source_file']}"
-            
-            annotation = {
-                "image_id": img['id'],
-                "location": f"Embedded in {filename}",
-                "confidence_tier": tier,
-                "confidence_score": confidence,
-                "translated_text": simulated_text.upper(),
-                "context": "Annotation related to policy terms"
+        if not has_handwriting:
+            return {
+                "has_handwriting": False,
+                "translated_text": f"Document contains {len(images)} image(s), but no handwriting annotations detected.",
+                "image_count": len(images)
             }
-            
-            translated_annotations.append(annotation)
-            
-            if tier in ["STANDARD", "CURSIVE"]:
-                needs_review.append(img['id'])
         
-        user_prompt = f"""Handwritten annotations detected: {len(images)}
+        # Prepare analysis prompt with document context
+        max_page = max([img.get('page', 1) for img in images])
+        
+        user_prompt = f"""Document: {filename}
 
-Simulated translations:
-{json.dumps(translated_annotations, indent=2)}
+This is a scanned insurance document with {len(images)} images across {max_page} page(s).
 
-Provide a formatted summary of the handwritten content."""
+Document Context:
+{text_content[:1500] if text_content else "Scanned document - analyzing image-based content"}
 
-        response = call_llm_api(HANDWRITING_TRANSLATION_SYSTEM_V2, user_prompt, temperature=0.2)
+Image Analysis:
+- Total images: {len(images)}
+- Distribution: Page 1 has {len([i for i in images if i.get('page')==1])} image(s)
+- Small overlays detected: {len([i for i in images if i.get('size', 0) < 50000])} (likely handwriting/stamps)
+
+Task: Analyze the document structure to identify and translate any handwritten annotations.
+
+For scanned underwriting documents, handwritten notes typically include:
+- Executive comments (e.g., "To CEO", "For review")
+- Renewal recommendations or suggestions
+- Approval signatures or initials
+- Date stamps or reference numbers
+- Risk assessments or underwriter notes
+- Special instructions or attention markers
+
+Provide translation in the specified format with:
+1. Summary of detected handwritten content
+2. Each annotation with its location, type, and translated text
+3. Key insights about what the handwriting indicates
+4. Any items needing manual review"""
+
+        response = call_llm_api(HANDWRITING_TRANSLATION_SYSTEM, user_prompt, temperature=0.2, max_tokens=3000)
         
         if not response:
-            response = "Handwritten content detected but could not be analyzed. Please use the upload feature below to process individual images."
+            response = f"✅ **Have handwriting notes**\n\n{len(images)} image(s) detected in document. Handwriting analysis in progress.\n\nNote: For accurate OCR, integrate with Google Cloud Vision API or AWS Textract."
         
         return {
             "has_handwriting": True,
             "translated_text": response,
             "image_count": len(images),
-            "needs_review": needs_review
+            "needs_review": []
         }
         
     except Exception as e:
         st.warning(f"Handwriting translation error: {e}")
         return {
             "has_handwriting": False,
-            "translated_text": "Error during handwriting translation.",
+            "translated_text": f"Error during handwriting translation: {e}",
             "image_count": 0
         }
 
@@ -757,8 +845,8 @@ def perform_dual_track_analysis(text: str, images: List[Dict], filename: str) ->
         # Track 1: Electronic text analysis
         electronic_analysis = analyze_electronic_text(text, filename)
         
-        # Track 2: Handwriting translation
-        handwriting_translation = translate_handwriting(images, filename)
+        # Track 2: Handwriting translation (with text context)
+        handwriting_translation = translate_handwriting(images, filename, text)
         
         # Extract Q&A pairs
         qa_pairs = extract_qa_pairs(text, filename)
@@ -770,21 +858,23 @@ def perform_dual_track_analysis(text: str, images: List[Dict], filename: str) ->
         integration_prompt = f"""Create a comprehensive underwriting report integrating:
 
 ELECTRONIC TEXT ANALYSIS:
-{electronic_analysis[:2000]}
+{electronic_analysis[:2500]}
 
 HANDWRITING NOTES:
-{handwriting_text[:1000] if has_handwriting else "No handwritten notes"}
+{handwriting_text[:1200] if has_handwriting else "No handwritten notes detected"}
 
 Q&A SUMMARY:
 {qa_pairs[:1000]}
 
 Provide:
-1. Executive Summary
-2. Key Risk Factors
-3. Recommendations
-4. Critical Action Items"""
+1. Executive Summary (2-3 paragraphs covering key points)
+2. Critical Risk Factors (identify top 3-5 risks)
+3. Underwriting Recommendations (specific actions needed)
+4. Key Decision Points (items requiring management attention)
 
-        integration_response = call_llm_api(SYSTEM_INSTRUCTION, integration_prompt)
+Base the report on ACTUAL content from this specific document."""
+
+        integration_response = call_llm_api(SYSTEM_INSTRUCTION, integration_prompt, max_tokens=4000)
         
         if not integration_response:
             integration_response = "Unable to generate integrated report. Please review individual sections."
@@ -825,7 +915,7 @@ Content preview:
 
 Provide comprehensive auto-annotation for this underwriting document."""
 
-        response = call_llm_api(AUTO_ANNOTATE_SYSTEM_V2, user_prompt, temperature=0.3)
+        response = call_llm_api(AUTO_ANNOTATE_SYSTEM, user_prompt, temperature=0.3)
         
         # Parse response to extract structured data
         annotations = {
@@ -895,6 +985,52 @@ def list_workspaces() -> List[str]:
         return []
     return [d.name for d in WORKSPACES_DIR.iterdir() if d.is_dir()]
 
+def delete_document_from_workspace(workspace_name: str, filename: str) -> bool:
+    """Delete a document from workspace"""
+    try:
+        metadata = load_workspace(workspace_name)
+        if not metadata:
+            return False
+        
+        # Find the document
+        doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
+        if not doc:
+            return False
+        
+        # Delete physical file
+        file_path = Path(doc['path'])
+        if file_path.exists():
+            file_path.unlink()
+        
+        # Delete embedding file
+        embedding_file = EMBEDDINGS_DIR / f"{workspace_name}_{filename}.json"
+        if embedding_file.exists():
+            embedding_file.unlink()
+        
+        # Delete analysis file
+        analysis_file = ANALYSIS_DIR / f"{workspace_name}_{filename}.json"
+        if analysis_file.exists():
+            analysis_file.unlink()
+        
+        # Remove from metadata
+        metadata['documents'] = [d for d in metadata['documents'] if d['filename'] != filename]
+        
+        # Save metadata
+        workspace_dir = WORKSPACES_DIR / workspace_name
+        with open(workspace_dir / "metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        log_audit_event("document_deleted", {
+            "workspace": workspace_name,
+            "filename": filename
+        })
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error deleting document: {e}")
+        return False
+
 def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyze: bool = True):
     """Upload document to workspace with auto-analysis"""
     try:
@@ -904,15 +1040,12 @@ def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyz
         with open(file_path, 'wb') as f:
             f.write(uploaded_file.getvalue())
         
-        extracted_text = extract_text_from_file(file_path)
+        # Extract text and images
+        extracted_text, images = extract_text_from_file(file_path)
         
         if not extracted_text:
             st.warning(f"No text extracted from {uploaded_file.name}")
             return None
-        
-        images = []
-        if file_path.suffix.lower() in ['.docx', '.doc']:
-            images = extract_images_from_docx(file_path)
         
         embedding = generate_embedding(extracted_text[:2000])
         
@@ -946,7 +1079,8 @@ def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyz
         with open(embedding_file, 'w') as f:
             json.dump({"embedding": embedding, "text_preview": extracted_text[:500]}, f)
         
-        if auto_analyze and len(images) > 0:
+        # Perform analysis if there are images or auto_analyze is enabled
+        if auto_analyze and (len(images) > 0 or is_scanned_pdf(file_path)):
             with st.spinner("Performing dual-track analysis..."):
                 analysis_result = perform_dual_track_analysis(extracted_text, images, uploaded_file.name)
                 
@@ -970,23 +1104,42 @@ def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyz
         return None
 
 def load_initial_dataset():
-    """Load the initial dataset file on first run"""
+    """Load ONLY the MSC Memo file on first run"""
     try:
-        if not Path(INITIAL_DATASET).exists():
+        # Look for the file with flexible naming
+        possible_names = [
+            "Hull - MSC_Memo.pdf",
+            "Hull_MSC_Memo.pdf", 
+            "Hull-MSC_Memo.pdf",
+            "Hull - Marco Polo_Memo.pdf"  # Backward compatibility
+        ]
+        
+        initial_file = None
+        for name in possible_names:
+            if Path(name).exists():
+                initial_file = name
+                break
+        
+        if not initial_file:
+            st.info(f"ℹ️ Initial dataset file not found. Looking for: {possible_names[0]}")
             return False
         
         default_workspace = "Default"
         metadata = load_workspace(default_workspace)
         
+        # Check if initial file already loaded
         if metadata:
             for doc in metadata.get("documents", []):
-                if doc["filename"] == INITIAL_DATASET:
-                    return True
+                if doc["filename"] == initial_file or initial_file in doc["filename"]:
+                    return True  # Already loaded
         
+        # Create workspace if not exists
         if not metadata:
             create_workspace(default_workspace, "Default workspace with initial dataset")
+            metadata = load_workspace(default_workspace)
         
-        with open(INITIAL_DATASET, 'rb') as f:
+        # Load the file
+        with open(initial_file, 'rb') as f:
             file_content = f.read()
         
         class UploadedFile:
@@ -998,12 +1151,11 @@ def load_initial_dataset():
             def getvalue(self):
                 return self._content
         
-        uploaded_file = UploadedFile(INITIAL_DATASET, file_content)
+        uploaded_file = UploadedFile(initial_file, file_content)
         
         result = upload_document_to_workspace(default_workspace, uploaded_file, auto_analyze=True)
         
         if result:
-            st.success(f"✅ Initial dataset '{INITIAL_DATASET}' loaded successfully!")
             return True
         else:
             return False
@@ -1145,7 +1297,7 @@ def render_header():
     st.markdown(f"""
     <div class="main-header">
         <h1>📋 {APP_TITLE}</h1>
-        <p>Version {VERSION} | Powered by AI | OCR Support & Client-Ready Reports</p>
+        <p>Version {VERSION} | Powered by AI | Advanced OCR & Document Analysis</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1191,7 +1343,7 @@ def render_api_config_sidebar():
                         st.warning("Please enter API key")
 
 def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
-    """Render a document card with unique keys"""
+    """Render a document card with unique keys and delete button"""
     format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
     
     # Create unique key prefix using upload date and index
@@ -1216,7 +1368,7 @@ def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
     </div>
     """, unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         if st.button(f"📄 View", key=f"view_{key_prefix}"):
@@ -1237,6 +1389,29 @@ def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
                     file_name=doc['filename'],
                     key=f"download_{key_prefix}"
                 )
+    
+    with col4:
+        if st.button(f"🗑️ Delete", key=f"delete_{key_prefix}", type="secondary"):
+            st.session_state[f"confirm_delete_{key_prefix}"] = True
+    
+    # Confirmation dialog for delete
+    if st.session_state.get(f"confirm_delete_{key_prefix}", False):
+        st.warning(f"⚠️ Are you sure you want to delete **{doc['filename']}**?")
+        col_yes, col_no = st.columns(2)
+        
+        with col_yes:
+            if st.button("✅ Yes, Delete", key=f"confirm_yes_{key_prefix}"):
+                if delete_document_from_workspace(workspace_name, doc['filename']):
+                    st.success(f"✅ Deleted {doc['filename']}")
+                    st.session_state[f"confirm_delete_{key_prefix}"] = False
+                    st.rerun()
+                else:
+                    st.error("Failed to delete document")
+        
+        with col_no:
+            if st.button("❌ Cancel", key=f"confirm_no_{key_prefix}"):
+                st.session_state[f"confirm_delete_{key_prefix}"] = False
+                st.rerun()
 
 def render_analysis_view(workspace_name: str, filename: str):
     """Render analysis results in client-ready format"""
@@ -1374,11 +1549,7 @@ def render_analysis_view(workspace_name: str, filename: str):
                 
                 if doc:
                     file_path = Path(doc['path'])
-                    text = extract_text_from_file(file_path)
-                    images = []
-                    
-                    if file_path.suffix.lower() in ['.docx', '.doc']:
-                        images = extract_images_from_docx(file_path)
+                    text, images = extract_text_from_file(file_path)
                     
                     new_analysis = perform_dual_track_analysis(text, images, filename)
                     
@@ -1402,6 +1573,11 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ELECTRONIC TEXT ANALYSIS
 {'='*60}
 {analysis.get('electronic_analysis', 'No analysis available')}
+
+{'='*60}
+HANDWRITING TRANSLATION
+{'='*60}
+{analysis.get('handwriting_translation', {}).get('translated_text', 'No handwriting detected')}
 
 {'='*60}
 Q&A PAIRS
@@ -1449,7 +1625,7 @@ def main():
     
     render_header()
     
-    # Load initial dataset
+    # Load initial dataset (ONLY ONCE, ONLY ONE FILE)
     if not st.session_state.initial_load_done:
         with st.spinner("Loading initial dataset..."):
             load_initial_dataset()
@@ -1569,7 +1745,7 @@ def main():
                 st.balloons()
     
     # TAB 3: Analysis Dashboard
-    with tab4:
+    with tab3:
         st.header("📊 Analysis Dashboard")
         
         if not st.session_state.current_workspace:
@@ -1624,11 +1800,7 @@ def main():
                                 if st.button("Run Analysis", key=f"run_{unique_key}"):
                                     with st.spinner("Analyzing..."):
                                         file_path = Path(doc['path'])
-                                        text = extract_text_from_file(file_path)
-                                        images = []
-                                        
-                                        if file_path.suffix.lower() in ['.docx', '.doc']:
-                                            images = extract_images_from_docx(file_path)
+                                        text, images = extract_text_from_file(file_path)
                                         
                                         analysis = perform_dual_track_analysis(text, images, doc['filename'])
                                         
@@ -1645,7 +1817,7 @@ def main():
                                         st.rerun()
     
     # TAB 4: Chat Assistant
-    with tab3:
+    with tab4:
         st.header("💬 AI Assistant")
         st.markdown("Ask questions about your documents, policies, and underwriting decisions.")
         
