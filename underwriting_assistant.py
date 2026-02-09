@@ -16,7 +16,7 @@ import base64
 # ===========================
 
 VERSION = "2.7"
-APP_TITLE = "Enhanced Underwriting Assistant - Professional"
+APP_TITLE = "Enhanced Underwriting Assistant - Professional System"
 
 # API Configuration
 DEFAULT_API_KEY = os.getenv("API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
@@ -560,23 +560,32 @@ def extract_text_from_file(file_path: Path) -> str:
         return ""
 
 def extract_images_from_docx(file_path: Path) -> List[Dict]:
-    """Extract embedded images from DOCX file"""
+    """Extract embedded images from DOCX file (skip external links)"""
     try:
         from docx import Document
         doc = Document(file_path)
         images = []
         
         for rel in doc.part.rels.values():
+            # Skip external relationships (like linked images from URLs)
+            if hasattr(rel, 'target_mode') and rel.target_mode == 'External':
+                continue
+            
+            # Only process internal image relationships
             if "image" in rel.target_ref:
-                image_data = rel.target_part.blob
-                image_id = f"img_{len(images)+1}"
-                
-                images.append({
-                    'id': image_id,
-                    'data': base64.b64encode(image_data).decode('utf-8'),
-                    'type': 'embedded',
-                    'source_file': file_path.name
-                })
+                try:
+                    image_data = rel.target_part.blob
+                    image_id = f"img_{len(images)+1}"
+                    
+                    images.append({
+                        'id': image_id,
+                        'data': base64.b64encode(image_data).decode('utf-8'),
+                        'type': 'embedded',
+                        'source_file': file_path.name
+                    })
+                except Exception as e:
+                    # Skip images that can't be processed
+                    continue
         
         return images
     except Exception as e:
@@ -1181,9 +1190,13 @@ def render_api_config_sidebar():
                     else:
                         st.warning("Please enter API key")
 
-def render_document_card(doc: Dict, workspace_name: str):
-    """Render a document card"""
+def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
+    """Render a document card with unique keys"""
     format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
+    
+    # Create unique key prefix using upload date and index
+    upload_ts = doc.get('upload_date', '').replace(':', '-').replace('.', '-')
+    key_prefix = f"{workspace_name}_{hashlib.md5(doc['filename'].encode()).hexdigest()[:8]}_{upload_ts}_{doc_index}"
     
     tags_html = " ".join([f'<span class="tag-badge">{tag}</span>' for tag in doc.get('tags', [])])
     
@@ -1206,12 +1219,12 @@ def render_document_card(doc: Dict, workspace_name: str):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button(f"📄 View", key=f"view_{doc['filename']}"):
+        if st.button(f"📄 View", key=f"view_{key_prefix}"):
             st.session_state.viewing_doc = doc
     
     with col2:
         if doc.get('has_deep_analysis'):
-            if st.button(f"📊 Analysis", key=f"analysis_{doc['filename']}"):
+            if st.button(f"📊 Analysis", key=f"analysis_{key_prefix}"):
                 st.session_state.viewing_analysis = (workspace_name, doc['filename'])
     
     with col3:
@@ -1222,7 +1235,7 @@ def render_document_card(doc: Dict, workspace_name: str):
                     label="⬇️ Download",
                     data=f.read(),
                     file_name=doc['filename'],
-                    key=f"download_{doc['filename']}"
+                    key=f"download_{key_prefix}"
                 )
 
 def render_analysis_view(workspace_name: str, filename: str):
@@ -1291,7 +1304,8 @@ def render_analysis_view(workspace_name: str, filename: str):
             "Select handwriting image(s)",
             type=['png', 'jpg', 'jpeg'],
             accept_multiple_files=True,
-            help="Upload images of handwritten notes or annotations"
+            help="Upload images of handwritten notes or annotations",
+            key=f"upload_handwriting_{filename}"
         )
         
         if uploaded_images:
@@ -1305,7 +1319,7 @@ def render_analysis_view(workspace_name: str, filename: str):
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        if st.button(f"🔍 Recognize Text", key=f"ocr_{idx}_{img_file.name}"):
+                        if st.button(f"🔍 Recognize Text", key=f"ocr_{filename}_{idx}_{img_file.name}"):
                             st.info("🚧 OCR recognition feature")
                             st.markdown("""
                             **In production, this would:**
@@ -1319,22 +1333,23 @@ def render_analysis_view(workspace_name: str, filename: str):
                             """)
                     
                     with col2:
-                        confidence = st.slider("Confidence Level", 0, 100, 75, key=f"conf_{idx}")
+                        confidence = st.slider("Confidence Level", 0, 100, 75, key=f"conf_{filename}_{idx}")
                     
                     # Simulated OCR result
-                    if f"ocr_result_{idx}" not in st.session_state:
-                        st.session_state[f"ocr_result_{idx}"] = ""
+                    session_key = f"ocr_result_{filename}_{idx}"
+                    if session_key not in st.session_state:
+                        st.session_state[session_key] = ""
                     
                     transcription = st.text_area(
                         "Recognized / Manual Transcription:",
-                        value=st.session_state[f"ocr_result_{idx}"],
-                        key=f"trans_{idx}_{img_file.name}",
+                        value=st.session_state[session_key],
+                        key=f"trans_{filename}_{idx}_{img_file.name}",
                         height=100,
                         help="Edit or enter the text from the handwriting"
                     )
                     
-                    if st.button(f"💾 Save Transcription", key=f"save_{idx}_{img_file.name}"):
-                        st.session_state[f"ocr_result_{idx}"] = transcription
+                    if st.button(f"💾 Save Transcription", key=f"save_{filename}_{idx}_{img_file.name}"):
+                        st.session_state[session_key] = transcription
                         st.success(f"✅ Saved transcription for {img_file.name}")
     
     elif view_mode == "Q&A Pairs":
@@ -1352,7 +1367,7 @@ def render_analysis_view(workspace_name: str, filename: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🔄 Re-run Analysis"):
+        if st.button("🔄 Re-run Analysis", key=f"rerun_{filename}"):
             with st.spinner("Re-analyzing document..."):
                 metadata = load_workspace(workspace_name)
                 doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
@@ -1374,7 +1389,7 @@ def render_analysis_view(workspace_name: str, filename: str):
                     st.rerun()
     
     with col2:
-        if st.button("📥 Export Report"):
+        if st.button("📥 Export Report", key=f"export_{filename}"):
             # Export as text file
             report_text = f"""UNDERWRITING ANALYSIS REPORT
 {'='*60}
@@ -1397,11 +1412,12 @@ Q&A PAIRS
                 label="Download TXT Report",
                 data=report_text,
                 file_name=f"{filename}_analysis_{datetime.now().strftime('%Y%m%d')}.txt",
-                mime="text/plain"
+                mime="text/plain",
+                key=f"download_report_{filename}"
             )
 
 # ===========================
-# Main Application (abbreviated - similar structure to before)
+# Main Application
 # ===========================
 
 def main():
@@ -1480,9 +1496,10 @@ def main():
         render_api_config_sidebar()
     
     # Main tabs
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📚 Document Library",
         "⬆️ Upload Documents",
+        "📊 Analysis Dashboard",
         "💬 Chat Assistant"
     ])
     
@@ -1502,8 +1519,8 @@ def main():
                 
                 st.markdown(f"**Showing {len(documents)} document(s)**")
                 
-                for doc in documents:
-                    render_document_card(doc, st.session_state.current_workspace)
+                for idx, doc in enumerate(documents):
+                    render_document_card(doc, st.session_state.current_workspace, doc_index=idx)
                 
                 if st.session_state.viewing_analysis:
                     workspace, filename = st.session_state.viewing_analysis
@@ -1529,7 +1546,12 @@ def main():
             auto_analyze = st.checkbox("Perform automatic analysis", value=True)
             
             if uploaded_files and st.button("Upload & Process"):
-                for file in uploaded_files:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for idx, file in enumerate(uploaded_files):
+                    status_text.text(f"Processing {file.name}...")
+                    
                     result = upload_document_to_workspace(
                         st.session_state.current_workspace,
                         file,
@@ -1538,11 +1560,141 @@ def main():
                     
                     if result:
                         st.success(f"✅ {file.name} uploaded!")
+                    else:
+                        st.error(f"❌ Failed to upload {file.name}")
+                    
+                    progress_bar.progress((idx + 1) / len(uploaded_files))
+                
+                status_text.text("Upload complete!")
+                st.balloons()
     
-    # TAB 3: Chat (abbreviated)
+    # TAB 3: Analysis Dashboard
+    with tab4:
+        st.header("📊 Analysis Dashboard")
+        
+        if not st.session_state.current_workspace:
+            st.warning("Please select a workspace first")
+        else:
+            metadata = load_workspace(st.session_state.current_workspace)
+            
+            if not metadata or not metadata.get('documents'):
+                st.info("No documents to analyze")
+            else:
+                documents = metadata.get('documents', [])
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Documents", len(documents))
+                
+                with col2:
+                    analyzed = sum(1 for d in documents if d.get('has_deep_analysis'))
+                    st.metric("Analyzed", analyzed)
+                
+                with col3:
+                    high_risk = sum(1 for d in documents if d.get('risk_level') == 'High')
+                    st.metric("High Risk", high_risk)
+                
+                with col4:
+                    pending = sum(1 for d in documents if d.get('decision') == 'Pending')
+                    st.metric("Pending Review", pending)
+                
+                st.markdown("---")
+                
+                st.subheader("Document Analysis Status")
+                
+                for idx, doc in enumerate(documents):
+                    upload_ts = doc.get('upload_date', '').replace(':', '-').replace('.', '-')
+                    unique_key = f"{hashlib.md5(doc['filename'].encode()).hexdigest()[:8]}_{upload_ts}_{idx}"
+                    
+                    with st.expander(f"{doc['filename']} - {doc.get('decision', 'Pending')}"):
+                        col1, col2 = st.columns([2, 1])
+                        
+                        with col1:
+                            st.markdown(f"**Risk Level:** {doc.get('risk_level', 'N/A')}")
+                            st.markdown(f"**Tags:** {', '.join(doc.get('tags', []))}")
+                            st.markdown(f"**Has Images:** {'Yes' if doc.get('has_images') else 'No'}")
+                        
+                        with col2:
+                            if doc.get('has_deep_analysis'):
+                                if st.button("View Full Analysis", key=f"view_full_{unique_key}"):
+                                    st.session_state.viewing_analysis = (st.session_state.current_workspace, doc['filename'])
+                                    st.rerun()
+                            else:
+                                if st.button("Run Analysis", key=f"run_{unique_key}"):
+                                    with st.spinner("Analyzing..."):
+                                        file_path = Path(doc['path'])
+                                        text = extract_text_from_file(file_path)
+                                        images = []
+                                        
+                                        if file_path.suffix.lower() in ['.docx', '.doc']:
+                                            images = extract_images_from_docx(file_path)
+                                        
+                                        analysis = perform_dual_track_analysis(text, images, doc['filename'])
+                                        
+                                        analysis_file = ANALYSIS_DIR / f"{st.session_state.current_workspace}_{doc['filename']}.json"
+                                        with open(analysis_file, 'w') as f:
+                                            json.dump(analysis, f, indent=2)
+                                        
+                                        doc['has_deep_analysis'] = True
+                                        
+                                        with open(WORKSPACES_DIR / st.session_state.current_workspace / "metadata.json", 'w') as f:
+                                            json.dump(metadata, f, indent=2)
+                                        
+                                        st.success("Analysis complete!")
+                                        st.rerun()
+    
+    # TAB 4: Chat Assistant
     with tab3:
         st.header("💬 AI Assistant")
-        st.info("Chat interface - similar to previous version")
+        st.markdown("Ask questions about your documents, policies, and underwriting decisions.")
+        
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
+        
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        if prompt := st.chat_input("Ask about underwriting, policies, risk assessment..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing..."):
+                    search_results = search_documents(
+                        prompt,
+                        st.session_state.current_workspace,
+                        top_k=3
+                    )
+                    
+                    context = "\n\n".join([
+                        f"Document: {r['document']['filename']}\n{r['preview']}"
+                        for r in search_results
+                    ])
+                    
+                    user_prompt = f"""User Question: {prompt}
+
+Relevant Documents:
+{context}
+
+Provide a comprehensive answer based on the available documents."""
+
+                    response = call_llm_api(SYSTEM_INSTRUCTION, user_prompt)
+                    
+                    if not response:
+                        response = "I apologize, but I'm unable to process your request at this time. Please ensure the API key is configured correctly in the sidebar."
+                    
+                    st.markdown(response)
+                    
+                    if search_results:
+                        with st.expander("📚 Sources"):
+                            for r in search_results:
+                                st.markdown(f"- **{r['document']['filename']}** (similarity: {r['similarity']:.2f})")
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
     main()
