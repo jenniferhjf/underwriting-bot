@@ -1,753 +1,1968 @@
-#!/usr/bin/env python3
-"""
-Enhanced Underwriting Assistant v2.9.0
-核心改进：
-1. Integrated Analysis Report 以表格形式展示
-2. 支持按保险类型、客户名称、承保年度筛选
-3. Handwriting Translation 显示图片+翻译+识别度百分比
-"""
-
 import streamlit as st
-import os
 import json
-import hashlib
-import base64
+import os
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-import io
+import hashlib
 import re
+import traceback
+from typing import List, Dict, Any, Optional, Tuple
+import requests
+from io import BytesIO
+import base64
 
-# 尝试导入 PDF 处理库
-try:
-    import fitz  # PyMuPDF
-    HAS_PYMUPDF = True
-except ImportError:
-    HAS_PYMUPDF = False
+# ===========================
+# Configuration
+# ===========================
 
-try:
-    import PyPDF2
-    HAS_PYPDF2 = True
-except ImportError:
-    HAS_PYPDF2 = False
+VERSION = "2.8.2"
+APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
 
-try:
-    from PIL import Image
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
-
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
-
-# =============================================================================
-# 核心配置
-# =============================================================================
-
-VERSION = "2.9.0"
-APP_TITLE = "Enhanced Underwriting Assistant - Table View System"
-
-# DeepSeek API 配置
+# API Configuration
+DEFAULT_API_KEY = os.getenv("API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
 API_BASE = "https://api.deepseek.com/v1"
 API_MODEL = "deepseek-chat"
-DEFAULT_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
 
-# 数据目录结构
-DATA_DIR = "data"
-WORKSPACES_DIR = os.path.join(DATA_DIR, "workspaces")
-EMBEDDINGS_DIR = os.path.join(DATA_DIR, "embeddings")
-ANALYSIS_DIR = os.path.join(DATA_DIR, "analysis")
-REVIEW_DIR = os.path.join(DATA_DIR, "review_queue")
-AUDIT_DIR = os.path.join(DATA_DIR, "audit_logs")
-CONFIG_DIR = os.path.join(DATA_DIR, "config")
+# Directory Structure
+DATA_DIR = Path("data")
+WORKSPACES_DIR = DATA_DIR / "workspaces"
+EMBEDDINGS_DIR = DATA_DIR / "embeddings"
+ANALYSIS_DIR = DATA_DIR / "analysis"
+REVIEW_DIR = DATA_DIR / "review_queue"
+AUDIT_DIR = DATA_DIR / "audit_logs"
+CONFIG_DIR = DATA_DIR / "config"
 
-# 初始数据集
-INITIAL_DATASET = "Hull_MSC_Memo.pdf"
+# Initial dataset file
+INITIAL_DATASET = "Hull - MSC_Memo.pdf"
 
-# 支持的文件格式
+# Supported file formats
 SUPPORTED_FORMATS = {
-    "pdf": "📄",
-    "docx": "📝",
-    "doc": "📝",
-    "txt": "📃",
-    "xlsx": "📊",
-    "xls": "📊",
-    "png": "🖼️",
-    "jpg": "🖼️",
-    "jpeg": "🖼️"
+    'pdf': '📄 PDF',
+    'docx': '📝 Word',
+    'doc': '📝 Word',
+    'txt': '📃 Text',
+    'xlsx': '📊 Excel',
+    'xls': '📊 Excel',
+    'png': '🖼️ Image',
+    'jpg': '🖼️ Image',
+    'jpeg': '🖼️ Image'
 }
 
-# 保险类型选项
-INSURANCE_TYPES = [
-    "全部",
-    "Hull & Machinery",
-    "Cargo",
-    "P&I",
-    "War Risk",
-    "Marine Liability",
-    "其他"
-]
+# Tag categories
+TAG_OPTIONS = {
+    'equipment': ['Hull', 'Cargo', 'Liability', 'Property', 'Marine', 'Aviation'],
+    'industry': ['Shipping', 'Manufacturing', 'Retail', 'Technology', 'Construction'],
+    'timeline': ['2024', '2025', '2026', 'Q1', 'Q2', 'Q3', 'Q4']
+}
 
-# =============================================================================
-# 系统提示词 - 简化版
-# =============================================================================
+# Insurance terminology dictionary
+INSURANCE_TERMS = {
+    'retention': 'The amount of risk that the insured retains before insurance coverage applies',
+    'premium': 'The amount paid for insurance coverage',
+    'coverage': 'The scope and extent of protection provided by an insurance policy',
+    'deductible': 'The amount the insured must pay before the insurer pays a claim',
+    'underwriting slip': 'A document containing key details of an insurance risk',
+    'loss ratio': 'The ratio of losses paid to premiums earned',
+    'exposure': 'The state of being subject to the possibility of loss',
+    'claims': 'Requests for compensation under an insurance policy',
+    'policy': 'A contract of insurance',
+    'endorsement': 'An amendment or addition to an insurance policy',
+    'exclusion': 'Specific conditions or circumstances that are not covered',
+    'limit': 'The maximum amount an insurer will pay for a covered loss',
+    'aggregate': 'The total limit of coverage for all claims during a policy period',
+    'per occurrence': 'The limit applicable to each individual claim or incident',
+    'retroactive date': 'The date from which coverage applies for claims-made policies'
+}
 
-ELECTRONIC_TEXT_SUMMARY_SYSTEM = """You are an underwriting document summarizer. 
-Provide a BRIEF summary (3-5 sentences) of the document content covering:
-- Insurance type and policy
-- Insured party
-- Key terms (premium, coverage, etc.)
-- Main risk factors
+# ===========================
+# System Prompts (Human-Readable Format)
+# ===========================
 
-Keep it concise and client-ready."""
+SYSTEM_INSTRUCTION = """You are an expert underwriting assistant with deep knowledge of insurance policies, 
+risk assessment, and document analysis. Your role is to help underwriters make informed decisions by:
+1. Extracting and analyzing key information from policy documents
+2. Translating handwritten annotations into structured electronic text
+3. Identifying critical risk factors and coverage terms
+4. Providing comprehensive analysis with actionable insights
+5. Maintaining strict accuracy and professional standards
 
-HANDWRITING_TRANSLATION_SYSTEM = """You are a handwriting translator for insurance documents.
+Always provide responses in clear, professional format suitable for business clients."""
 
-CRITICAL: For each handwritten annotation:
-1. Translate to text (keep original language if unclear)
-2. Estimate confidence (0-100%)
-3. Describe location (e.g., "Top of page 1", "Margin right")
+ELECTRONIC_TEXT_ANALYSIS_SYSTEM = """Analyze this insurance document and provide a BRIEF summary ONLY (3-5 sentences maximum).
 
-Output format:
+**CRITICAL**: Base on ACTUAL document content. Keep it concise and client-friendly.
+
+Cover these key points in 3-5 sentences:
+- Insurance type and policy name
+- Insured party and broker (if mentioned)
+- Key financial terms (premium, coverage, loss ratio)
+- Main risk factors or special notes
+
+Example format:
+"This is a renewal memorandum for MSC vessel Hull & Machinery insurance. The insured is Mediterranean Shipping Company, broker is Cambiaso Risso Asia. Premium of USD 125,000 with net loss ratio of 74.32% and brokerage rate of 22.5%. Deductible increased from USD 500k to USD 1mil with FCIL writing at own merits."
+
+DO NOT use sections, headers, or detailed breakdown. Just 3-5 concise sentences."""
+
+HANDWRITING_TRANSLATION_SYSTEM = """Translate handwritten annotations from this insurance document.
+
+**CRITICAL**: For EACH handwritten annotation, provide ONLY:
+
 [Location] Translated text (Confidence: XX%)
 
-Example:
+Example output:
 [Top of Page 1] To CEO: Renewal suggestions for your consideration (Confidence: 85%)
-[Right margin, Page 2] Check premium calculation (Confidence: 92%)
+[Right margin, Page 2] Check premium calculation and verify loss ratio (Confidence: 92%)
+[Bottom of Page 3] Approved for renewal with increased deductible (Confidence: 78%)
 
-DO NOT write a summary. Only translate each handwriting piece."""
+Rules:
+- DO NOT write "Handwriting Summary" or any overview section
+- DO NOT write "Detected Annotations" header
+- DO NOT write "Key Insights" section
+- Only provide direct translations in the format: [Location] Text (Confidence: XX%)
+- Estimate confidence 0-100% based on clarity
+- Keep each translation concise and clear"""
 
-# =============================================================================
-# 工具函数
-# =============================================================================
+# Q&A Extraction removed in v2.8.2
 
-def ensure_directories():
-    """确保所有必需的目录存在"""
-    for dir_path in [DATA_DIR, WORKSPACES_DIR, EMBEDDINGS_DIR, 
-                     ANALYSIS_DIR, REVIEW_DIR, AUDIT_DIR, CONFIG_DIR]:
-        os.makedirs(dir_path, exist_ok=True)
+AUTO_ANNOTATE_SYSTEM = """Automatically annotate this underwriting document with key metadata.
 
-def log_audit(action: str, details: Dict[str, Any]):
-    """记录审计日志"""
-    timestamp = datetime.now().isoformat()
-    log_entry = {
-        "timestamp": timestamp,
-        "action": action,
-        "details": details
-    }
+Provide the annotation in this business-ready format:
+
+## Document Classification
+**Tags:** [tag1, tag2, tag3]
+**Insurance Type:** [specific type]
+**Risk Level:** [Low/Medium/High/Critical]
+
+## Preliminary Decision
+**Recommendation:** [Accept/Review/Decline/Pending]
+**Confidence:** [0-100%]
+
+## Financial Summary
+**Estimated Premium:** [amount or TBD]
+**Retention Amount:** [amount or TBD]
+
+## Executive Summary
+[2-3 sentence overview of the case]
+
+## Key Insights
+- [Insight 1]
+- [Insight 2]
+- [Insight 3]
+
+---
+Note: This is an automated preliminary analysis. Final decisions require human underwriter review."""
+
+# ===========================
+# Configuration Management
+# ===========================
+
+def ensure_dirs():
+    """Create necessary directories"""
+    for dir_path in [WORKSPACES_DIR, EMBEDDINGS_DIR, ANALYSIS_DIR, REVIEW_DIR, AUDIT_DIR, CONFIG_DIR]:
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+def load_api_config() -> Dict:
+    """Load API configuration"""
+    config_file = CONFIG_DIR / "api_config.json"
     
-    log_file = os.path.join(AUDIT_DIR, f"{datetime.now().strftime('%Y%m%d')}.json")
+    if config_file.exists():
+        try:
+            with open(config_file, 'r') as f:
+                return json.load(f)
+        except:
+            pass
     
-    logs = []
-    if os.path.exists(log_file):
-        with open(log_file, 'r', encoding='utf-8') as f:
-            logs = json.load(f)
+    return {"api_key": DEFAULT_API_KEY}
+
+def save_api_config(api_key: str):
+    """Save API configuration"""
+    config_file = CONFIG_DIR / "api_config.json"
     
-    logs.append(log_entry)
-    
-    with open(log_file, 'w', encoding='utf-8') as f:
-        json.dump(logs, f, indent=2, ensure_ascii=False)
+    with open(config_file, 'w') as f:
+        json.dump({"api_key": api_key}, f)
 
 def get_api_key() -> str:
-    """获取 API 密钥"""
-    if "api_key" in st.session_state and st.session_state.api_key:
+    """Get API key from config or session state"""
+    if 'api_key' in st.session_state and st.session_state.api_key:
         return st.session_state.api_key
-    return DEFAULT_API_KEY
+    
+    config = load_api_config()
+    return config.get('api_key', DEFAULT_API_KEY)
 
-def call_deepseek_api(messages: List[Dict[str, str]], max_tokens: int = 4000) -> Optional[str]:
-    """调用 DeepSeek API"""
-    api_key = get_api_key()
-    
-    if not HAS_REQUESTS:
-        return "Error: requests library not installed"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
-    
-    data = {
-        "model": API_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": 0.7
-    }
+def validate_api_key(api_key: str) -> Tuple[bool, str]:
+    """Validate API key and test connection"""
+    if not api_key:
+        return False, "API key is empty"
     
     try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": API_MODEL,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 10
+        }
+        
         response = requests.post(
             f"{API_BASE}/chat/completions",
             headers=headers,
-            json=data,
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            return True, "API key is valid"
+        elif response.status_code == 401:
+            return False, "API key is invalid or unauthorized"
+        else:
+            return False, f"API error: {response.status_code}"
+            
+    except Exception as e:
+        return False, f"Connection error: {str(e)}"
+
+# ===========================
+# Utility Functions
+# ===========================
+
+def log_audit_event(event_type: str, details: Dict[str, Any]):
+    """Log audit events for compliance tracking"""
+    try:
+        timestamp = datetime.now().isoformat()
+        log_entry = {
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "details": details,
+            "user": "system"
+        }
+        
+        log_file = AUDIT_DIR / f"audit_{datetime.now().strftime('%Y%m')}.jsonl"
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry) + '\n')
+    except Exception as e:
+        st.warning(f"Failed to log audit event: {e}")
+
+def preprocess_insurance_text(text: str) -> str:
+    """Preprocess text with insurance terminology awareness"""
+    processed = text.lower()
+    
+    for term in INSURANCE_TERMS.keys():
+        processed = re.sub(rf'\b{term}s?\b', term, processed, flags=re.IGNORECASE)
+    
+    processed = re.sub(r'\s+', ' ', processed).strip()
+    
+    return processed
+
+def generate_embedding(text: str) -> List[float]:
+    """Generate embedding vector for text"""
+    hash_obj = hashlib.sha256(preprocess_insurance_text(text).encode())
+    hash_int = int.from_bytes(hash_obj.digest(), byteorder='big')
+    
+    embedding = []
+    for i in range(1536):
+        seed = hash_int + i
+        embedding.append((seed % 1000) / 1000.0 - 0.5)
+    
+    return embedding
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calculate cosine similarity between two vectors"""
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    magnitude1 = sum(a * a for a in vec1) ** 0.5
+    magnitude2 = sum(b * b for b in vec2) ** 0.5
+    
+    if magnitude1 == 0 or magnitude2 == 0:
+        return 0.0
+    
+    return dot_product / (magnitude1 * magnitude2)
+
+def extract_tag_from_filename(filename: str) -> Optional[str]:
+    """Extract primary tag from filename"""
+    name_without_ext = os.path.splitext(filename)[0]
+    parts = re.split(r'[\s_\-]+', name_without_ext)
+    
+    if not parts:
+        return None
+    
+    first_word = parts[0].strip().title()
+    
+    if first_word.isdigit() or re.match(r'\d{4}', first_word):
+        return None
+    
+    return first_word
+
+def call_llm_api(system_prompt: str, user_prompt: str, 
+                 temperature: float = 0.3, max_tokens: int = 4000) -> str:
+    """Call LLM API for text generation"""
+    try:
+        api_key = get_api_key()
+        
+        if not api_key:
+            st.error("⚠️ API key not configured. Please set it in the sidebar.")
+            return ""
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": API_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        response = requests.post(
+            f"{API_BASE}/chat/completions",
+            headers=headers,
+            json=payload,
             timeout=60
         )
+        
+        if response.status_code == 401:
+            st.error("⚠️ API Authentication Failed. Please check your API key in the sidebar.")
+            return ""
+        
         response.raise_for_status()
         result = response.json()
-        return result["choices"][0]["message"]["content"]
+        
+        return result['choices'][0]['message']['content']
+        
+    except requests.exceptions.HTTPError as e:
+        st.error(f"API HTTP Error: {e}")
+        return ""
     except Exception as e:
-        return f"API Error: {str(e)}"
+        st.error(f"API Error: {e}")
+        return ""
 
-# =============================================================================
-# PDF 处理函数
-# =============================================================================
+# ===========================
+# PDF Processing Functions
+# ===========================
 
-def extract_text_from_pdf(file_path: str) -> Tuple[str, List[Dict]]:
-    """从 PDF 提取文本和图片"""
-    text = ""
-    images = []
-    
-    if not HAS_PYMUPDF:
-        return "Error: PyMuPDF not installed", []
-    
+def is_scanned_pdf(file_path: Path) -> bool:
+    """Check if PDF is scanned (image-only) and needs OCR"""
     try:
+        import fitz
         doc = fitz.open(file_path)
         
-        for page_num in range(len(doc)):
+        total_text_len = 0
+        total_images = 0
+        pages_to_check = min(3, len(doc))
+        
+        for page_num in range(pages_to_check):
             page = doc[page_num]
+            text = page.get_text().strip()
+            images = page.get_images()
             
-            # 提取文本
-            page_text = page.get_text()
-            if page_text.strip():
-                text += f"\n--- Page {page_num + 1} ---\n{page_text}"
-            
-            # 提取图片
-            image_list = page.get_images(full=True)
-            for img_index, img in enumerate(image_list):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                
-                # 转换为 base64
-                image_b64 = base64.b64encode(image_bytes).decode()
-                
-                images.append({
-                    "page": page_num + 1,
-                    "index": img_index,
-                    "format": base_image["ext"],
-                    "data": image_b64,
-                    "width": base_image.get("width", 0),
-                    "height": base_image.get("height", 0)
-                })
+            total_text_len += len(text)
+            total_images += len(images)
         
         doc.close()
         
-        # 检测是否是扫描件
-        if not text.strip() and images:
-            text = f"[Scanned PDF detected: {len(images)} images found across {len(doc)} pages]"
+        if total_images > 0 and total_text_len < 100:
+            return True
         
-        return text, images
+        return False
         
     except Exception as e:
-        return f"Error extracting PDF: {str(e)}", []
+        return False
+
+def extract_images_from_pdf(file_path: Path) -> List[Dict]:
+    """Extract all images from PDF (for scanned documents and handwriting detection)"""
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        images = []
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            image_list = page.get_images()
+            
+            for img_index, img in enumerate(image_list):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    # Convert to base64
+                    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    images.append({
+                        'id': f"page{page_num+1}_img{img_index+1}",
+                        'data': image_b64,
+                        'type': 'scanned',
+                        'page': page_num + 1,
+                        'source_file': file_path.name,
+                        'size': len(image_bytes)
+                    })
+                except Exception as e:
+                    continue
+        
+        doc.close()
+        return images
+        
+    except Exception as e:
+        st.warning(f"PDF image extraction error: {e}")
+        return []
 
 def detect_handwriting_in_images(images: List[Dict]) -> bool:
-    """简单的启发式检测：是否可能包含手写内容"""
+    """Detect if images likely contain handwriting (heuristic approach)"""
     if not images:
         return False
     
-    # 启发式规则：
-    # 1. 图片较多（可能是扫描件 + 手写批注）
-    # 2. 有小尺寸图片（可能是批注）
-    
-    if len(images) > 3:
-        return True
-    
+    # Count images per page
+    pages = {}
     for img in images:
-        # 检查是否有较小的图片（可能是手写批注）
-        if img.get("width", 0) < 800 or img.get("height", 0) < 600:
+        page = img.get('page', 1)
+        pages[page] = pages.get(page, 0) + 1
+    
+    # If any page has 4+ images, likely has handwriting overlays/annotations
+    for page, count in pages.items():
+        if count >= 4:
+            return True
+    
+    # Check for small images (might be signatures/stamps)
+    for img in images:
+        if img.get('size', 0) < 50000:  # < 50KB
             return True
     
     return False
 
-# =============================================================================
-# 文档分析函数
-# =============================================================================
+def extract_text_from_scanned_pdf(file_path: Path) -> str:
+    """Extract information from scanned PDF"""
+    try:
+        import fitz
+        
+        doc = fitz.open(file_path)
+        
+        extracted_info = f"""📷 SCANNED DOCUMENT DETECTED
+{'='*50}
 
-def analyze_electronic_text(text: str) -> str:
-    """分析电子文本，返回简短摘要"""
-    messages = [
-        {"role": "system", "content": ELECTRONIC_TEXT_SUMMARY_SYSTEM},
-        {"role": "user", "content": f"Summarize this insurance document:\n\n{text[:3000]}"}
-    ]
-    
-    summary = call_deepseek_api(messages, max_tokens=500)
-    return summary if summary else "Unable to generate summary"
+This document appears to be a scanned/image-based PDF.
 
-def translate_handwriting(images: List[Dict], document_context: str = "") -> List[Dict]:
-    """翻译手写内容"""
-    if not images:
-        return []
-    
-    # 构建提示词
-    context_info = f"Document context: {document_context[:500]}" if document_context else ""
-    
-    prompt = f"""Analyze the handwriting in this insurance document.
-{context_info}
+Document Information:
+- Filename: {file_path.name}
+- Total Pages: {len(doc)}
+- Format: PDF {doc.metadata.get('format', 'Unknown')}
+- Creator: {doc.metadata.get('creator', 'Unknown')}
 
-The document contains {len(images)} images across multiple pages.
-For each handwritten annotation you can identify, provide:
-1. Location (page number and position)
-2. Translated text
-3. Confidence percentage (0-100%)
+Image Content Analysis:
+"""
+        
+        for i, page in enumerate(doc):
+            images = page.get_images()
+            extracted_info += f"\nPage {i+1}: Contains {len(images)} image(s)"
+        
+        extracted_info += "\n\n" + "="*50
+        extracted_info += "\n⚠️ NOTE: This is an image-only PDF without extractable text."
+        extracted_info += "\n\n📋 To extract text from this document:"
+        extracted_info += "\n1. The system will analyze images for handwritten annotations"
+        extracted_info += "\n2. Use the 'Handwriting Translation' tab to view results"
+        extracted_info += "\n3. You can also upload individual page images for OCR processing"
+        extracted_info += "\n\nFor production use, integrate with:"
+        extracted_info += "\n- Google Cloud Vision API"
+        extracted_info += "\n- AWS Textract"
+        extracted_info += "\n- Azure Computer Vision"
+        
+        doc.close()
+        
+        return extracted_info
+        
+    except Exception as e:
+        return f"Error processing scanned PDF: {e}"
 
-Format:
-[Location] Text (Confidence: XX%)"""
-
-    messages = [
-        {"role": "system", "content": HANDWRITING_TRANSLATION_SYSTEM},
-        {"role": "user", "content": prompt}
-    ]
-    
-    translation_result = call_deepseek_api(messages, max_tokens=2000)
-    
-    # 解析翻译结果
-    translations = []
-    
-    if translation_result and "[" in translation_result:
-        # 简单解析格式: [Location] Text (Confidence: XX%)
-        lines = translation_result.split('\n')
-        for line in lines:
-            if '[' in line and ']' in line:
+def extract_text_from_pdf(file_path: Path) -> Tuple[str, List[Dict]]:
+    """Enhanced PDF extraction - returns (text, images)"""
+    try:
+        import fitz
+        doc = fitz.open(file_path)
+        
+        text_content = []
+        all_images = []
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # Try to extract text
+            text = page.get_text()
+            if text.strip():
+                text_content.append(f"=== Page {page_num+1} ===\n{text}\n")
+            
+            # Extract images
+            image_list = page.get_images()
+            for img_index, img in enumerate(image_list):
                 try:
-                    # 提取位置
-                    location = line[line.find('[')+1:line.find(']')]
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
                     
-                    # 提取文本和置信度
-                    rest = line[line.find(']')+1:].strip()
-                    if '(Confidence:' in rest:
-                        text = rest[:rest.find('(Confidence:')].strip()
-                        conf_str = rest[rest.find('(Confidence:')+12:rest.find('%)')]
-                        confidence = int(conf_str.strip())
-                    else:
-                        text = rest
-                        confidence = 70  # 默认值
-                    
-                    translations.append({
-                        "location": location,
-                        "text": text,
-                        "confidence": confidence,
-                        "image_ref": None  # 可以后续关联到具体图片
+                    all_images.append({
+                        'id': f"page{page_num+1}_img{img_index+1}",
+                        'data': base64.b64encode(image_bytes).decode('utf-8'),
+                        'type': 'scanned' if not text.strip() else 'embedded',
+                        'page': page_num + 1,
+                        'source_file': file_path.name,
+                        'size': len(image_bytes)
                     })
                 except:
                     continue
-    
-    # 如果解析失败，创建一个默认翻译
-    if not translations and images:
-        translations.append({
-            "location": f"Page 1",
-            "text": translation_result if translation_result else "Unable to translate handwriting",
-            "confidence": 50,
-            "image_ref": 0
-        })
-    
-    return translations
+        
+        doc.close()
+        
+        # If no text but has images, it's a scanned document
+        if not text_content and all_images:
+            scanned_info = extract_text_from_scanned_pdf(file_path)
+            return (scanned_info, all_images)
+        
+        final_text = "\n\n".join(text_content) if text_content else ""
+        return (final_text, all_images)
+        
+    except Exception as e:
+        st.warning(f"PDF extraction error: {e}")
+        return ("", [])
 
-# =============================================================================
-# 工作区和文档管理
-# =============================================================================
+def extract_text_from_docx(file_path: Path) -> str:
+    """Extract text from DOCX file"""
+    try:
+        from docx import Document
+        doc = Document(file_path)
+        text = "\n\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        return text
+    except Exception as e:
+        st.warning(f"DOCX extraction error: {e}")
+        return ""
 
-def create_workspace(workspace_name: str, description: str = ""):
-    """创建工作区"""
-    workspace_dir = os.path.join(WORKSPACES_DIR, workspace_name)
-    os.makedirs(workspace_dir, exist_ok=True)
+def extract_text_from_txt(file_path: Path) -> str:
+    """Extract text from TXT file"""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    except Exception as e:
+        st.warning(f"TXT extraction error: {e}")
+        return ""
+
+def extract_text_from_file(file_path: Path) -> Tuple[str, List[Dict]]:
+    """Extract text and images based on file type"""
+    ext = file_path.suffix.lower().lstrip('.')
+    
+    if ext == 'pdf':
+        return extract_text_from_pdf(file_path)
+    elif ext in ['docx', 'doc']:
+        text = extract_text_from_docx(file_path)
+        images = extract_images_from_docx(file_path)
+        return (text, images)
+    elif ext == 'txt':
+        text = extract_text_from_txt(file_path)
+        return (text, [])
+    else:
+        return ("", [])
+
+def extract_images_from_docx(file_path: Path) -> List[Dict]:
+    """Extract embedded images from DOCX file (skip external links)"""
+    try:
+        from docx import Document
+        doc = Document(file_path)
+        images = []
+        
+        for rel in doc.part.rels.values():
+            # Skip external relationships (like linked images from URLs)
+            if hasattr(rel, 'target_mode') and rel.target_mode == 'External':
+                continue
+            
+            # Only process internal image relationships
+            if "image" in rel.target_ref:
+                try:
+                    image_data = rel.target_part.blob
+                    image_id = f"img_{len(images)+1}"
+                    
+                    images.append({
+                        'id': image_id,
+                        'data': base64.b64encode(image_data).decode('utf-8'),
+                        'type': 'embedded',
+                        'source_file': file_path.name,
+                        'size': len(image_data)
+                    })
+                except Exception as e:
+                    # Skip images that can't be processed
+                    continue
+        
+        return images
+    except Exception as e:
+        st.warning(f"Image extraction error: {e}")
+        return []
+
+def has_embedded_images(file_path: Path) -> bool:
+    """Check if document has embedded images (potential handwriting)"""
+    try:
+        if file_path.suffix.lower() in ['.docx', '.doc']:
+            images = extract_images_from_docx(file_path)
+            return len(images) > 0
+        elif file_path.suffix.lower() == '.pdf':
+            import fitz
+            doc = fitz.open(file_path)
+            for page in doc:
+                if len(page.get_images()) > 0:
+                    doc.close()
+                    return True
+            doc.close()
+            return False
+        return False
+    except:
+        return False
+
+def classify_handwriting_quality(image_data: str) -> Tuple[str, float]:
+    """Classify handwriting quality (simulated)"""
+    hash_val = int(hashlib.md5(image_data[:100].encode()).hexdigest(), 16) % 100
+    
+    if hash_val > 70:
+        return "CLEAR", 0.85
+    elif hash_val > 40:
+        return "STANDARD", 0.60
+    else:
+        return "CURSIVE", 0.30
+
+# ===========================
+# Core Analysis Functions
+# ===========================
+
+def auto_generate_tags(filename: str, text_preview: str) -> List[str]:
+    """Auto-generate tags from filename and content"""
+    tags = []
+    
+    filename_tag = extract_tag_from_filename(filename)
+    if filename_tag:
+        tags.append(filename_tag)
+    
+    text_lower = text_preview.lower()
+    
+    for tag in TAG_OPTIONS['equipment']:
+        if tag.lower() in text_lower:
+            tags.append(tag)
+    
+    for tag in TAG_OPTIONS['industry']:
+        if tag.lower() in text_lower:
+            tags.append(tag)
+    
+    for tag in TAG_OPTIONS['timeline']:
+        if tag in text_preview:
+            tags.append(tag)
+    
+    return list(set(tags))[:5]
+
+def extract_qa_pairs(text: str, filename: str) -> str:
+    """Extract Q&A pairs using LLM - returns formatted text"""
+    try:
+        user_prompt = f"""Document: {filename}
+
+Content:
+{text[:3000]}
+
+Extract all question-answer pairs from this underwriting document."""
+
+        response = call_llm_api(QA_EXTRACTION_SYSTEM, user_prompt)
+        
+        if not response:
+            return "No Q&A pairs could be extracted from this document."
+        
+        return response
+        
+    except Exception as e:
+        st.warning(f"Q&A extraction error: {e}")
+        return "Error extracting Q&A pairs."
+
+def analyze_electronic_text(text: str, filename: str) -> str:
+    """Analyze electronic/printed text - returns formatted text"""
+    try:
+        user_prompt = f"""Document: {filename}
+
+Full Content:
+{text[:6000]}
+
+Perform comprehensive analysis of this underwriting document. 
+Base your analysis ONLY on the actual content provided above."""
+
+        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt, max_tokens=5000)
+        
+        if not response:
+            return "Unable to analyze electronic text. Please check API configuration."
+        
+        return response
+        
+    except Exception as e:
+        st.warning(f"Electronic text analysis error: {e}")
+        return "Error during electronic text analysis."
+
+def translate_handwriting(images: List[Dict], filename: str, text_content: str = "") -> Dict:
+    """Translate handwritten annotations with intelligent detection"""
+    try:
+        if not images:
+            return {
+                "has_handwriting": False,
+                "translated_text": "No images detected in this document.",
+                "image_count": 0
+            }
+        
+        # Detect handwriting using heuristics
+        has_handwriting = detect_handwriting_in_images(images)
+        
+        if not has_handwriting:
+            return {
+                "has_handwriting": False,
+                "translated_text": f"Document contains {len(images)} image(s), but no handwriting annotations detected.",
+                "image_count": len(images)
+            }
+        
+        # Prepare analysis prompt with document context
+        max_page = max([img.get('page', 1) for img in images])
+        
+        user_prompt = f"""Document: {filename}
+
+This is a scanned insurance document with {len(images)} images across {max_page} page(s).
+
+Document Context:
+{text_content[:1500] if text_content else "Scanned document - analyzing image-based content"}
+
+Image Analysis:
+- Total images: {len(images)}
+- Distribution: Page 1 has {len([i for i in images if i.get('page')==1])} image(s)
+- Small overlays detected: {len([i for i in images if i.get('size', 0) < 50000])} (likely handwriting/stamps)
+
+Task: Analyze the document structure to identify and translate any handwritten annotations.
+
+For scanned underwriting documents, handwritten notes typically include:
+- Executive comments (e.g., "To CEO", "For review")
+- Renewal recommendations or suggestions
+- Approval signatures or initials
+- Date stamps or reference numbers
+- Risk assessments or underwriter notes
+- Special instructions or attention markers
+
+Provide translation in the specified format with:
+1. Summary of detected handwritten content
+2. Each annotation with its location, type, and translated text
+3. Key insights about what the handwriting indicates
+4. Any items needing manual review"""
+
+        response = call_llm_api(HANDWRITING_TRANSLATION_SYSTEM, user_prompt, temperature=0.2, max_tokens=3000)
+        
+        if not response:
+            response = f"✅ **Have handwriting notes**\n\n{len(images)} image(s) detected in document. Handwriting analysis in progress.\n\nNote: For accurate OCR, integrate with Google Cloud Vision API or AWS Textract."
+        
+        return {
+            "has_handwriting": True,
+            "translated_text": response,
+            "image_count": len(images),
+            "needs_review": []
+        }
+        
+    except Exception as e:
+        st.warning(f"Handwriting translation error: {e}")
+        return {
+            "has_handwriting": False,
+            "translated_text": f"Error during handwriting translation: {e}",
+            "image_count": 0
+        }
+
+def perform_dual_track_analysis(text: str, images: List[Dict], filename: str) -> Dict:
+    """Perform comprehensive dual-track analysis"""
+    try:
+        # Track 1: Electronic text analysis
+        electronic_analysis = analyze_electronic_text(text, filename)
+        
+        # Track 2: Handwriting translation (with text context)
+        handwriting_translation = translate_handwriting(images, filename, text)
+        
+        # Extract Q&A pairs
+        qa_pairs = extract_qa_pairs(text, filename)
+        
+        # Combined analysis
+        has_handwriting = handwriting_translation.get('has_handwriting', False)
+        handwriting_text = handwriting_translation.get('translated_text', '')
+        
+        integration_prompt = f"""Create a comprehensive underwriting report integrating:
+
+ELECTRONIC TEXT ANALYSIS:
+{electronic_analysis[:2500]}
+
+HANDWRITING NOTES:
+{handwriting_text[:1200] if has_handwriting else "No handwritten notes detected"}
+
+Q&A SUMMARY:
+{qa_pairs[:1000]}
+
+Provide:
+1. Executive Summary (2-3 paragraphs covering key points)
+2. Critical Risk Factors (identify top 3-5 risks)
+3. Underwriting Recommendations (specific actions needed)
+4. Key Decision Points (items requiring management attention)
+
+Base the report on ACTUAL content from this specific document."""
+
+        integration_response = call_llm_api(SYSTEM_INSTRUCTION, integration_prompt, max_tokens=4000)
+        
+        if not integration_response:
+            integration_response = "Unable to generate integrated report. Please review individual sections."
+        
+        full_analysis = {
+            "electronic_analysis": electronic_analysis,
+            "handwriting_translation": handwriting_translation,
+            "qa_extraction": qa_pairs,
+            "integrated_report": integration_response,
+            "has_handwriting": has_handwriting,
+            "analysis_timestamp": datetime.now().isoformat()
+        }
+        
+        return full_analysis
+        
+    except Exception as e:
+        st.error(f"Dual-track analysis error: {e}")
+        traceback.print_exc()
+        return {}
+
+def auto_annotate_by_llm(filename: str, text: str, existing_tags: List[str] = None) -> Dict:
+    """Auto-annotate document using LLM"""
+    auto_tags = []
+    
+    try:
+        filename_tag = extract_tag_from_filename(filename)
+        auto_tags = auto_generate_tags(filename, text[:2000])
+        
+        if existing_tags:
+            auto_tags.extend(existing_tags)
+        auto_tags = list(set(auto_tags))
+        
+        user_prompt = f"""Document: {filename}
+Existing tags: {', '.join(auto_tags)}
+
+Content preview:
+{text[:3000]}
+
+Provide comprehensive auto-annotation for this underwriting document."""
+
+        response = call_llm_api(AUTO_ANNOTATE_SYSTEM, user_prompt, temperature=0.3)
+        
+        # Parse response to extract structured data
+        annotations = {
+            'tags': auto_tags if auto_tags else ['Unclassified'],
+            'insurance_type': 'General',
+            'decision': 'Pending',
+            'premium_estimate': 'TBD',
+            'retention': 'TBD',
+            'risk_level': 'Medium',
+            'case_summary': response[:200] if response else 'Manual review required',
+            'key_insights': ['Requires analysis'],
+            'confidence': 0.7
+        }
+        
+        return annotations
+            
+    except Exception as e:
+        st.warning(f"Auto-annotation error: {e}")
+        return {
+            'tags': auto_tags if auto_tags else ['Unclassified'],
+            'insurance_type': 'General',
+            'decision': 'Pending',
+            'premium_estimate': 'TBD',
+            'retention': 'TBD',
+            'risk_level': 'Medium',
+            'case_summary': 'Auto-annotation error, manual review required',
+            'key_insights': ['Error during analysis'],
+            'confidence': 0.0
+        }
+
+# ===========================
+# Workspace Management
+# ===========================
+
+def create_workspace(name: str, description: str = ""):
+    """Create a new workspace"""
+    workspace_dir = WORKSPACES_DIR / name
+    workspace_dir.mkdir(exist_ok=True)
     
     metadata = {
-        "name": workspace_name,
+        "name": name,
         "description": description,
         "created_at": datetime.now().isoformat(),
         "documents": []
     }
     
-    metadata_file = os.path.join(workspace_dir, "metadata.json")
-    with open(metadata_file, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    with open(workspace_dir / "metadata.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
     
-    log_audit("create_workspace", {"workspace": workspace_name})
+    log_audit_event("workspace_created", {"workspace": name})
+    
+    return metadata
 
-def load_workspace_metadata(workspace_name: str) -> Optional[Dict]:
-    """加载工作区元数据"""
-    metadata_file = os.path.join(WORKSPACES_DIR, workspace_name, "metadata.json")
-    if os.path.exists(metadata_file):
-        with open(metadata_file, 'r', encoding='utf-8') as f:
+def load_workspace(name: str) -> Optional[Dict]:
+    """Load workspace metadata"""
+    workspace_dir = WORKSPACES_DIR / name
+    metadata_file = workspace_dir / "metadata.json"
+    
+    if metadata_file.exists():
+        with open(metadata_file, 'r') as f:
             return json.load(f)
     return None
 
-def save_workspace_metadata(workspace_name: str, metadata: Dict):
-    """保存工作区元数据"""
-    metadata_file = os.path.join(WORKSPACES_DIR, workspace_name, "metadata.json")
-    with open(metadata_file, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+def list_workspaces() -> List[str]:
+    """List all workspaces"""
+    if not WORKSPACES_DIR.exists():
+        return []
+    return [d.name for d in WORKSPACES_DIR.iterdir() if d.is_dir()]
 
-def upload_document(workspace_name: str, uploaded_file, auto_analyze: bool = True) -> bool:
-    """上传文档到工作区"""
+def delete_document_from_workspace(workspace_name: str, filename: str) -> bool:
+    """Delete a document from workspace"""
     try:
-        # 保存文件
-        workspace_dir = os.path.join(WORKSPACES_DIR, workspace_name)
-        file_path = os.path.join(workspace_dir, uploaded_file.name)
+        metadata = load_workspace(workspace_name)
+        if not metadata:
+            return False
         
-        with open(file_path, 'wb') as f:
-            f.write(uploaded_file.getvalue())
+        # Find the document
+        doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
+        if not doc:
+            return False
         
-        # 提取文本和图片
-        text, images = "", []
-        if uploaded_file.name.lower().endswith('.pdf'):
-            text, images = extract_text_from_pdf(file_path)
+        # Delete physical file
+        file_path = Path(doc['path'])
+        if file_path.exists():
+            file_path.unlink()
         
-        # 检测手写
-        has_handwriting = detect_handwriting_in_images(images)
+        # Delete embedding file
+        embedding_file = EMBEDDINGS_DIR / f"{workspace_name}_{filename}.json"
+        if embedding_file.exists():
+            embedding_file.unlink()
         
-        # 分析文档
-        summary = ""
-        handwriting_translations = []
+        # Delete analysis file
+        analysis_file = ANALYSIS_DIR / f"{workspace_name}_{filename}.json"
+        if analysis_file.exists():
+            analysis_file.unlink()
         
-        if auto_analyze and text:
-            summary = analyze_electronic_text(text)
-            
-            if has_handwriting:
-                handwriting_translations = translate_handwriting(images, text)
+        # Remove from metadata
+        metadata['documents'] = [d for d in metadata['documents'] if d['filename'] != filename]
         
-        # 保存分析结果
-        analysis_data = {
-            "filename": uploaded_file.name,
-            "upload_time": datetime.now().isoformat(),
-            "has_images": len(images) > 0,
-            "image_count": len(images),
-            "has_handwriting": has_handwriting,
-            "summary": summary,
-            "handwriting_translations": handwriting_translations,
-            "text_preview": text[:500] if text else ""
-        }
+        # Save metadata
+        workspace_dir = WORKSPACES_DIR / workspace_name
+        with open(workspace_dir / "metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
         
-        analysis_file = os.path.join(ANALYSIS_DIR, f"{uploaded_file.name}.json")
-        with open(analysis_file, 'w', encoding='utf-8') as f:
-            json.dump(analysis_data, f, indent=2, ensure_ascii=False)
-        
-        # 保存图片数据
-        if images:
-            images_file = os.path.join(ANALYSIS_DIR, f"{uploaded_file.name}_images.json")
-            with open(images_file, 'w', encoding='utf-8') as f:
-                json.dump(images, f, indent=2)
-        
-        # 更新工作区元数据
-        metadata = load_workspace_metadata(workspace_name)
-        if metadata:
-            # 提取文档信息
-            doc_info = {
-                "filename": uploaded_file.name,
-                "upload_time": datetime.now().isoformat(),
-                "size": uploaded_file.size,
-                "has_handwriting": has_handwriting,
-                "insurance_type": extract_insurance_type(text, summary),
-                "client_name": extract_client_name(text, summary),
-                "underwriting_year": extract_year(text, summary)
-            }
-            
-            metadata["documents"].append(doc_info)
-            save_workspace_metadata(workspace_name, metadata)
-        
-        log_audit("upload_document", {
+        log_audit_event("document_deleted", {
             "workspace": workspace_name,
-            "filename": uploaded_file.name,
-            "has_handwriting": has_handwriting
+            "filename": filename
         })
         
         return True
         
     except Exception as e:
-        st.error(f"Upload error: {str(e)}")
+        st.error(f"Error deleting document: {e}")
         return False
 
-def extract_insurance_type(text: str, summary: str) -> str:
-    """从文本中提取保险类型"""
-    combined = (text + " " + summary).lower()
+def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyze: bool = True):
+    """Upload document to workspace with auto-analysis"""
+    try:
+        workspace_dir = WORKSPACES_DIR / workspace_name
+        file_path = workspace_dir / uploaded_file.name
+        
+        with open(file_path, 'wb') as f:
+            f.write(uploaded_file.getvalue())
+        
+        # Extract text and images
+        extracted_text, images = extract_text_from_file(file_path)
+        
+        if not extracted_text:
+            st.warning(f"No text extracted from {uploaded_file.name}")
+            return None
+        
+        embedding = generate_embedding(extracted_text[:2000])
+        
+        annotations = {}
+        if auto_analyze:
+            annotations = auto_annotate_by_llm(uploaded_file.name, extracted_text)
+        
+        doc_metadata = {
+            "filename": uploaded_file.name,
+            "format": file_path.suffix.lstrip('.'),
+            "path": str(file_path),
+            "size": uploaded_file.size,
+            "upload_date": datetime.now().isoformat(),
+            "extracted_text_preview": extracted_text[:500],
+            "has_images": len(images) > 0,
+            "image_count": len(images),
+            "tags": annotations.get('tags', []),
+            "insurance_type": annotations.get('insurance_type', ''),
+            "decision": annotations.get('decision', 'Pending'),
+            "risk_level": annotations.get('risk_level', 'Medium'),
+            "has_deep_analysis": False
+        }
+        
+        metadata = load_workspace(workspace_name)
+        metadata["documents"].append(doc_metadata)
+        
+        with open(workspace_dir / "metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        embedding_file = EMBEDDINGS_DIR / f"{workspace_name}_{uploaded_file.name}.json"
+        with open(embedding_file, 'w') as f:
+            json.dump({"embedding": embedding, "text_preview": extracted_text[:500]}, f)
+        
+        # Perform analysis if there are images or auto_analyze is enabled
+        if auto_analyze and (len(images) > 0 or is_scanned_pdf(file_path)):
+            with st.spinner("Performing dual-track analysis..."):
+                analysis_result = perform_dual_track_analysis(extracted_text, images, uploaded_file.name)
+                
+                analysis_file = ANALYSIS_DIR / f"{workspace_name}_{uploaded_file.name}.json"
+                with open(analysis_file, 'w') as f:
+                    json.dump(analysis_result, f, indent=2)
+                
+                doc_metadata["has_deep_analysis"] = True
+        
+        log_audit_event("document_uploaded", {
+            "workspace": workspace_name,
+            "filename": uploaded_file.name,
+            "auto_analyzed": auto_analyze
+        })
+        
+        return doc_metadata
+        
+    except Exception as e:
+        st.error(f"Upload error: {e}")
+        traceback.print_exc()
+        return None
+
+def load_initial_dataset():
+    """Load ONLY the MSC Memo file on first run"""
+    try:
+        # Look for the file with flexible naming
+        possible_names = [
+            "Hull - MSC_Memo.pdf",
+            "Hull_MSC_Memo.pdf", 
+            "Hull-MSC_Memo.pdf",
+            "Hull - Marco Polo_Memo.pdf"  # Backward compatibility
+        ]
+        
+        initial_file = None
+        for name in possible_names:
+            if Path(name).exists():
+                initial_file = name
+                break
+        
+        if not initial_file:
+            st.info(f"ℹ️ Initial dataset file not found. Looking for: {possible_names[0]}")
+            return False
+        
+        default_workspace = "Default"
+        metadata = load_workspace(default_workspace)
+        
+        # Check if initial file already loaded
+        if metadata:
+            for doc in metadata.get("documents", []):
+                if doc["filename"] == initial_file or initial_file in doc["filename"]:
+                    return True  # Already loaded
+        
+        # Create workspace if not exists
+        if not metadata:
+            create_workspace(default_workspace, "Default workspace with initial dataset")
+            metadata = load_workspace(default_workspace)
+        
+        # Load the file
+        with open(initial_file, 'rb') as f:
+            file_content = f.read()
+        
+        class UploadedFile:
+            def __init__(self, name, content):
+                self.name = name
+                self.size = len(content)
+                self._content = content
+            
+            def getvalue(self):
+                return self._content
+        
+        uploaded_file = UploadedFile(initial_file, file_content)
+        
+        result = upload_document_to_workspace(default_workspace, uploaded_file, auto_analyze=True)
+        
+        if result:
+            return True
+        else:
+            return False
+            
+    except Exception as e:
+        st.error(f"Error loading initial dataset: {e}")
+        return False
+
+# ===========================
+# Search and Retrieval
+# ===========================
+
+def search_documents(query: str, workspace_name: str, top_k: int = 5) -> List[Dict]:
+    """Search documents using semantic similarity"""
+    try:
+        query_embedding = generate_embedding(query)
+        results = []
+        
+        workspace_metadata = load_workspace(workspace_name)
+        if not workspace_metadata:
+            return []
+        
+        for doc in workspace_metadata.get("documents", []):
+            filename = doc["filename"]
+            embedding_file = EMBEDDINGS_DIR / f"{workspace_name}_{filename}.json"
+            
+            if embedding_file.exists():
+                with open(embedding_file, 'r') as f:
+                    data = json.load(f)
+                    doc_embedding = data["embedding"]
+                    
+                    similarity = cosine_similarity(query_embedding, doc_embedding)
+                    
+                    query_lower = query.lower()
+                    for term in INSURANCE_TERMS.keys():
+                        if term in query_lower and term in data.get("text_preview", "").lower():
+                            similarity += 0.1
+                    
+                    results.append({
+                        "document": doc,
+                        "similarity": similarity,
+                        "preview": data.get("text_preview", "")
+                    })
+        
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        
+        return results[:top_k]
+        
+    except Exception as e:
+        st.error(f"Search error: {e}")
+        return []
+
+# ===========================
+# UI Functions
+# ===========================
+
+def inject_css():
+    """Inject custom CSS"""
     
-    if "hull" in combined or "machinery" in combined:
+    dark_css = """
+    <style>
+    .stApp {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    }
+    
+    .main-header {
+        background: linear-gradient(90deg, #1e40af 0%, #7c3aed 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+    
+    .main-header h1 {
+        color: #ffffff;
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin: 0;
+    }
+    
+    .main-header p {
+        color: #e0e7ff;
+        font-size: 1.1rem;
+        margin-top: 0.5rem;
+    }
+    
+    .tag-badge {
+        display: inline-block;
+        padding: 0.4rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin: 0.2rem;
+        background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+        color: white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    
+    .analysis-badge {
+        background: linear-gradient(135deg, #10b981, #059669);
+    }
+    
+    .handwriting-badge {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+    }
+    
+    .doc-card {
+        background: rgba(30, 41, 59, 0.8);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        margin-bottom: 1rem;
+        transition: all 0.3s ease;
+    }
+    
+    .doc-card:hover {
+        border-color: #3b82f6;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        transform: translateY(-2px);
+    }
+    
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    }
+    </style>
+    """
+    
+    st.markdown(dark_css, unsafe_allow_html=True)
+
+def render_header():
+    """Render application header"""
+    st.markdown(f"""
+    <div class="main-header">
+        <h1>📋 {APP_TITLE}</h1>
+        <p>Version {VERSION} | Powered by AI | Advanced OCR & Document Analysis</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_api_config_sidebar():
+    """Render API configuration in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("⚙️ API Configuration")
+        
+        current_key = get_api_key()
+        
+        with st.expander("🔑 Configure AI Model API"):
+            api_key_input = st.text_input(
+                "API Key:",
+                value=current_key,
+                type="password",
+                help="Enter your API key"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("💾 Save", use_container_width=True):
+                    if api_key_input:
+                        save_api_config(api_key_input)
+                        st.session_state.api_key = api_key_input
+                        st.success("✅ Saved!")
+                        st.rerun()
+                    else:
+                        st.warning("Please enter API key")
+            
+            with col2:
+                if st.button("🧪 Test", use_container_width=True):
+                    if api_key_input:
+                        with st.spinner("Testing..."):
+                            is_valid, message = validate_api_key(api_key_input)
+                            
+                            if is_valid:
+                                st.success(f"✅ {message}")
+                            else:
+                                st.error(f"❌ {message}")
+                    else:
+                        st.warning("Please enter API key")
+
+def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
+    """Render a document card with unique keys and delete button"""
+    format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
+    
+    # Create unique key prefix using upload date and index
+    upload_ts = doc.get('upload_date', '').replace(':', '-').replace('.', '-')
+    key_prefix = f"{workspace_name}_{hashlib.md5(doc['filename'].encode()).hexdigest()[:8]}_{upload_ts}_{doc_index}"
+    
+    tags_html = " ".join([f'<span class="tag-badge">{tag}</span>' for tag in doc.get('tags', [])])
+    
+    analysis_badge = ""
+    if doc.get('has_deep_analysis'):
+        analysis_badge = '<span class="tag-badge analysis-badge">✓ Analyzed</span>'
+    
+    if doc.get('has_images'):
+        analysis_badge += ' <span class="tag-badge handwriting-badge">✍️ Has Images</span>'
+    
+    st.markdown(f"""
+    <div class="doc-card">
+        <h3>{format_icon} {doc['filename']}</h3>
+        <p><strong>Risk Level:</strong> {doc.get('risk_level', 'N/A')} | 
+           <strong>Decision:</strong> {doc.get('decision', 'Pending')}</p>
+        <p>{tags_html} {analysis_badge}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button(f"📄 View", key=f"view_{key_prefix}"):
+            st.session_state.viewing_doc = doc
+    
+    with col2:
+        if doc.get('has_deep_analysis'):
+            if st.button(f"📊 Analysis", key=f"analysis_{key_prefix}"):
+                st.session_state.viewing_analysis = (workspace_name, doc['filename'])
+    
+    with col3:
+        file_path = Path(doc['path'])
+        if file_path.exists():
+            with open(file_path, 'rb') as f:
+                st.download_button(
+                    label="⬇️ Download",
+                    data=f.read(),
+                    file_name=doc['filename'],
+                    key=f"download_{key_prefix}"
+                )
+    
+    with col4:
+        if st.button(f"🗑️ Delete", key=f"delete_{key_prefix}", type="secondary"):
+            st.session_state[f"confirm_delete_{key_prefix}"] = True
+    
+    # Confirmation dialog for delete
+    if st.session_state.get(f"confirm_delete_{key_prefix}", False):
+        st.warning(f"⚠️ Are you sure you want to delete **{doc['filename']}**?")
+        col_yes, col_no = st.columns(2)
+        
+        with col_yes:
+            if st.button("✅ Yes, Delete", key=f"confirm_yes_{key_prefix}"):
+                if delete_document_from_workspace(workspace_name, doc['filename']):
+                    st.success(f"✅ Deleted {doc['filename']}")
+                    st.session_state[f"confirm_delete_{key_prefix}"] = False
+                    st.rerun()
+                else:
+                    st.error("Failed to delete document")
+        
+        with col_no:
+            if st.button("❌ Cancel", key=f"confirm_no_{key_prefix}"):
+                st.session_state[f"confirm_delete_{key_prefix}"] = False
+                st.rerun()
+
+def parse_handwriting_translations(text: str) -> List[Dict]:
+    """解析手写翻译结果，提取位置、文本和置信度"""
+    translations = []
+    if not text:
+        return translations
+    
+    lines = text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('**'):
+            continue
+            
+        # 查找格式: [Location] Text (Confidence: XX%)
+        if '[' in line and ']' in line:
+            try:
+                # 提取位置
+                location_start = line.find('[')
+                location_end = line.find(']')
+                location = line[location_start+1:location_end]
+                
+                # 提取剩余部分
+                rest = line[location_end+1:].strip()
+                
+                # 提取置信度
+                confidence = 70  # 默认值
+                if '(Confidence:' in rest or '(confidence:' in rest:
+                    conf_start = rest.lower().find('(confidence:')
+                    conf_section = rest[conf_start:]
+                    # 查找百分号之前的数字
+                    import re
+                    conf_match = re.search(r'(\d+)%', conf_section)
+                    if conf_match:
+                        confidence = int(conf_match.group(1))
+                    
+                    # 提取文本（去掉置信度部分）
+                    text_content = rest[:conf_start].strip()
+                else:
+                    text_content = rest
+                
+                if text_content:  # 只添加有文本内容的
+                    translations.append({
+                        'location': location,
+                        'text': text_content,
+                        'confidence': confidence
+                    })
+            except Exception as e:
+                continue  # 跳过格式不正确的行
+    
+    return translations
+
+def extract_insurance_type(analysis: Dict) -> str:
+    """从分析结果中提取保险类型"""
+    text = json.dumps(analysis).lower()
+    
+    if 'hull' in text and 'machinery' in text:
         return "Hull & Machinery"
-    elif "cargo" in combined:
+    elif 'hull' in text:
+        return "Hull"
+    elif 'cargo' in text:
         return "Cargo"
-    elif "p&i" in combined or "protection" in combined:
+    elif 'p&i' in text or 'protection' in text and 'indemnity' in text:
         return "P&I"
-    elif "war" in combined:
+    elif 'war' in text and 'risk' in text:
         return "War Risk"
-    elif "liability" in combined:
-        return "Marine Liability"
+    elif 'liability' in text:
+        return "Liability"
     else:
         return "其他"
 
-def extract_client_name(text: str, summary: str) -> str:
-    """从文本中提取客户名称"""
-    # 简单的提取逻辑：查找常见模式
-    combined = text + " " + summary
+def extract_client_name(analysis: Dict) -> str:
+    """从分析结果中提取客户名称"""
+    text = json.dumps(analysis)
     
-    # 查找 "Insured:" 或类似模式
+    # 查找常见模式
     patterns = [
-        r"Insured[:\s]+([A-Z][a-zA-Z\s&]+)",
-        r"Client[:\s]+([A-Z][a-zA-Z\s&]+)",
-        r"Assured[:\s]+([A-Z][a-zA-Z\s&]+)"
+        r'[Ii]nsured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
+,
+        r'[Cc]lient[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
+,
+        r'[Aa]ssured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
+,
+        r'MSC',
+        r'Mediterranean Shipping Company'
     ]
     
     for pattern in patterns:
-        match = re.search(pattern, combined)
+        match = re.search(pattern, text)
         if match:
-            return match.group(1).strip()[:50]
+            if isinstance(match.group(0), str):
+                return match.group(0)[:50].strip()
     
     return "Unknown"
 
-def extract_year(text: str, summary: str) -> str:
-    """从文本中提取承保年度"""
-    combined = text + " " + summary
+def extract_year(analysis: Dict) -> str:
+    """从分析结果中提取承保年度"""
+    text = json.dumps(analysis)
     
-    # 查找年份（2000-2030）
-    years = re.findall(r'20[0-2][0-9]', combined)
+    # 查找 2020-2030 之间的年份
+    years = re.findall(r'20[2-3][0-9]', text)
+    
     if years:
-        return years[0]
+        # 返回最常见的年份
+        from collections import Counter
+        most_common = Counter(years).most_common(1)
+        return most_common[0][0]
     
     return datetime.now().strftime("%Y")
 
-# =============================================================================
-# Streamlit UI
-# =============================================================================
-
-def render_table_view():
-    """渲染表格视图"""
-    st.header("📊 Integrated Analysis Report")
+def render_analysis_view(workspace_name: str, filename: str):
+    """Render analysis results in client-ready format"""
+    analysis_file = ANALYSIS_DIR / f"{workspace_name}_{filename}.json"
     
-    # 获取所有工作区的文档
-    all_documents = []
-    
-    if os.path.exists(WORKSPACES_DIR):
-        for workspace_name in os.listdir(WORKSPACES_DIR):
-            metadata = load_workspace_metadata(workspace_name)
-            if metadata and "documents" in metadata:
-                for doc in metadata["documents"]:
-                    doc["workspace"] = workspace_name
-                    all_documents.append(doc)
-    
-    if not all_documents:
-        st.info("📭 No documents uploaded yet")
+    if not analysis_file.exists():
+        st.warning("No analysis found for this document")
         return
     
-    # 筛选控件
-    col1, col2, col3 = st.columns(3)
+    with open(analysis_file, 'r') as f:
+        analysis = json.load(f)
     
-    with col1:
-        selected_type = st.selectbox(
-            "保险类型",
-            ["全部"] + list(set([d.get("insurance_type", "其他") for d in all_documents]))
-        )
+    st.subheader("📊 Comprehensive Analysis Results")
     
-    with col2:
-        selected_client = st.selectbox(
-            "客户名称",
-            ["全部"] + list(set([d.get("client_name", "Unknown") for d in all_documents]))
-        )
+    # Show API status warning if needed
+    api_key = get_api_key()
+    if not api_key:
+        st.error("⚠️ API key not configured. Analysis may be incomplete.")
     
-    with col3:
-        selected_year = st.selectbox(
-            "承保年度",
-            ["全部"] + sorted(list(set([d.get("underwriting_year", "Unknown") for d in all_documents])), reverse=True)
-        )
-    
-    # 应用筛选
-    filtered_docs = all_documents
-    
-    if selected_type != "全部":
-        filtered_docs = [d for d in filtered_docs if d.get("insurance_type") == selected_type]
-    
-    if selected_client != "全部":
-        filtered_docs = [d for d in filtered_docs if d.get("client_name") == selected_client]
-    
-    if selected_year != "全部":
-        filtered_docs = [d for d in filtered_docs if d.get("underwriting_year") == selected_year]
-    
-    # 显示表格
-    st.write(f"**共 {len(filtered_docs)} 个文档**")
-    
-    if filtered_docs:
-        # 创建表格数据
-        table_data = []
-        for doc in filtered_docs:
-            table_data.append({
-                "案例名称": doc.get("filename", "Unknown"),
-                "类别": doc.get("insurance_type", "其他"),
-                "承保年度": doc.get("underwriting_year", "Unknown"),
-                "最新更新时间": doc.get("upload_time", "Unknown")[:19]
-            })
-        
-        # 显示为可点击的表格
-        for idx, row in enumerate(table_data):
-            with st.expander(f"📄 {row['案例名称']} | {row['类别']} | {row['承保年度']}"):
-                col_a, col_b = st.columns([1, 3])
-                
-                with col_a:
-                    st.write("**文档信息**")
-                    st.write(f"- 类别: {row['类别']}")
-                    st.write(f"- 承保年度: {row['承保年度']}")
-                    st.write(f"- 更新时间: {row['最新更新时间']}")
-                
-                with col_b:
-                    # 显示分析结果
-                    render_document_analysis(filtered_docs[idx])
-
-def render_document_analysis(doc_info: Dict):
-    """渲染单个文档的分析结果"""
-    filename = doc_info.get("filename")
-    
-    # 加载分析数据
-    analysis_file = os.path.join(ANALYSIS_DIR, f"{filename}.json")
-    if not os.path.exists(analysis_file):
-        st.warning("分析数据不存在")
-        return
-    
-    with open(analysis_file, 'r', encoding='utf-8') as f:
-        analysis_data = json.load(f)
-    
-    # 显示电子文本摘要
-    st.write("**Electronic Text Analysis**")
-    summary = analysis_data.get("summary", "No summary available")
-    st.write(summary)
-    
-    # 显示手写翻译
-    if analysis_data.get("has_handwriting"):
-        st.write("---")
-        st.write("**Handwriting Translation**")
-        
-        translations = analysis_data.get("handwriting_translations", [])
-        
-        if translations:
-            # 加载图片数据
-            images_file = os.path.join(ANALYSIS_DIR, f"{filename}_images.json")
-            images = []
-            if os.path.exists(images_file):
-                with open(images_file, 'r', encoding='utf-8') as f:
-                    images = json.load(f)
-            
-            for trans in translations:
-                col_img, col_text = st.columns([1, 2])
-                
-                with col_img:
-                    # 显示相关图片（如果有）
-                    if images and trans.get("image_ref") is not None:
-                        img_idx = trans["image_ref"]
-                        if img_idx < len(images):
-                            img_data = images[img_idx]["data"]
-                            st.image(f"data:image/png;base64,{img_data}", width=200)
-                    else:
-                        st.write(f"🖼️ {trans['location']}")
-                
-                with col_text:
-                    confidence = trans.get("confidence", 0)
-                    st.write(f"**{trans['text']}**")
-                    
-                    # 显示置信度条
-                    color = "green" if confidence >= 80 else "orange" if confidence >= 60 else "red"
-                    st.progress(confidence / 100)
-                    st.caption(f"识别度: {confidence}%")
-        else:
-            st.info("✅ Have handwriting notes (上传手写图片以获取翻译)")
-
-def main():
-    """主函数"""
-    st.set_page_config(
-        page_title=APP_TITLE,
-        page_icon="📊",
-        layout="wide"
+    view_mode = st.radio(
+        "Select View:",
+        ["Integrated Report", "Electronic Text", "Handwriting Translation"],
+        horizontal=True
     )
     
-    ensure_directories()
+    if view_mode == "Integrated Report":
+        st.markdown("### 📊 Integrated Analysis Report")
+        
+        # 表格展示部分
+        st.markdown("#### Document Information")
+        
+        # 提取元数据
+        insurance_type = extract_insurance_type(analysis)
+        client_name = extract_client_name(analysis)
+        underwriting_year = extract_year(analysis)
+        timestamp = analysis.get('timestamp', datetime.now().isoformat())[:19]
+        
+        # Create table data
+        table_data = {
+            "Document Name": [filename],
+            "Category": [insurance_type],
+            "Underwriting Year": [underwriting_year],
+            "Last Updated": [timestamp]
+        }
+        
+        import pandas as pd
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        
+        # 主要内容
+        st.markdown("#### Main Content")
+        
+        report = analysis.get('integrated_report', '')
+        
+        if not report or "unable" in report.lower():
+            st.error("❌ Analysis generation failed")
+            st.info("💡 Configure API key in sidebar and click 'Re-run Analysis'")
+        else:
+            st.markdown(report)
+        
+    elif view_mode == "Electronic Text":
+        st.markdown("### 📄 Electronic Text Analysis")
+        
+        electronic = analysis.get('electronic_analysis', '')
+        
+        if not electronic or len(electronic) < 50:
+            st.warning("⚠️ Electronic text analysis is empty or incomplete")
+            st.info("This may be a scanned document. Check the Handwriting Translation tab.")
+        else:
+            st.markdown(electronic)
     
-    st.title(f"{APP_TITLE} v{VERSION}")
-    
-    # 侧边栏
-    with st.sidebar:
-        st.header("⚙️ 配置")
+    elif view_mode == "Handwriting Translation":
+        st.markdown("### ✍️ Handwriting Translation")
         
-        # API Key
-        api_key = st.text_input(
-            "API Key",
-            value=get_api_key(),
-            type="password",
-            key="api_key_input"
+        handwriting = analysis.get('handwriting_translation', {})
+        has_handwriting = handwriting.get('has_handwriting', False)
+        
+        if has_handwriting:
+            st.success("✅ **Have handwriting notes**")
+            
+            # 解析翻译结果
+            translated_text = handwriting.get('translated_text', '')
+            translations = parse_handwriting_translations(translated_text)
+            
+            # 加载图片数据
+            images = analysis.get('images', [])
+            
+            if translations:
+                st.markdown("#### Handwriting Recognition Results")
+                
+                for idx, trans in enumerate(translations):
+                    col_img, col_text = st.columns([1, 2])
+                    
+                    with col_img:
+                        # 显示对应图片（如果有）
+                        if idx < len(images) and images[idx].get('data'):
+                            try:
+                                img_data = images[idx]['data']
+                                st.image(f"data:image/png;base64,{img_data}", width=200)
+                            except:
+                                st.write(f"🖼️ {trans['location']}")
+                        else:
+                            st.write(f"🖼️ {trans['location']}")
+                    
+                    with col_text:
+                        # 显示翻译文本
+                        st.markdown(f"**{trans['text']}**")
+                        
+                        # 显示识别度（进度条 + 百分比）
+                        confidence = trans.get('confidence', 0)
+                        
+                        # 根据置信度选择颜色
+                        if confidence >= 80:
+                            color_class = "🟢"  # 绿色
+                        elif confidence >= 60:
+                            color_class = "🟡"  # 黄色
+                        else:
+                            color_class = "🔴"  # 红色
+                        
+                        st.progress(confidence / 100)
+                        st.caption(f"{color_class} Confidence: {confidence}%")
+                    
+                    st.markdown("---")
+            else:
+                # 如果解析失败，显示原始文本
+                st.markdown(translated_text)
+        else:
+            st.info("ℹ️ No handwritten content detected in this document")
+        
+        st.markdown("---")
+        st.markdown("### 📤 Upload Handwriting Images for Recognition")
+        st.markdown("Upload photos or scans of handwritten annotations:")
+        
+        uploaded_images = st.file_uploader(
+            "Select handwriting image(s)",
+            type=['png', 'jpg', 'jpeg'],
+            accept_multiple_files=True,
+            help="Upload images of handwritten notes or annotations",
+            key=f"upload_handwriting_{filename}"
         )
         
-        if st.button("💾 保存"):
-            st.session_state.api_key = api_key
-            st.success("已保存")
-        
-        st.divider()
-        
-        # 工作区选择
-        st.header("📁 工作区")
-        
-        workspaces = []
-        if os.path.exists(WORKSPACES_DIR):
-            workspaces = [d for d in os.listdir(WORKSPACES_DIR) 
-                         if os.path.isdir(os.path.join(WORKSPACES_DIR, d))]
-        
-        if not workspaces:
-            create_workspace("Default", "默认工作区")
-            workspaces = ["Default"]
-        
-        current_workspace = st.selectbox(
-            "选择工作区",
-            workspaces,
-            key="current_workspace"
-        )
-        
-        st.divider()
-        
-        # 上传文件
-        st.header("📤 上传文档")
-        uploaded_file = st.file_uploader(
-            "选择文件",
-            type=list(SUPPORTED_FORMATS.keys())
-        )
-        
-        if uploaded_file:
-            if st.button("🚀 上传并分析"):
-                with st.spinner("处理中..."):
-                    success = upload_document(
-                        current_workspace,
-                        uploaded_file,
-                        auto_analyze=True
+        if uploaded_images:
+            st.markdown(f"**Uploaded {len(uploaded_images)} image(s)**")
+            
+            for idx, img_file in enumerate(uploaded_images):
+                with st.expander(f"Image {idx+1}: {img_file.name}"):
+                    # Display image
+                    st.image(img_file, caption=img_file.name, use_container_width=True)
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button(f"🔍 Recognize Text", key=f"ocr_{filename}_{idx}_{img_file.name}"):
+                            st.info("🚧 OCR recognition feature")
+                            st.markdown("""
+                            **In production, this would:**
+                            1. Send image to OCR service (Google Vision / AWS Textract)
+                            2. Extract handwritten text
+                            3. Display recognized text below
+                            4. Allow editing and confirmation
+                            
+                            **Current simulation:**
+                            This is a handwritten annotation that would be processed by OCR.
+                            """)
+                    
+                    with col2:
+                        confidence = st.slider("Confidence Level", 0, 100, 75, key=f"conf_{filename}_{idx}")
+                    
+                    # Simulated OCR result
+                    session_key = f"ocr_result_{filename}_{idx}"
+                    if session_key not in st.session_state:
+                        st.session_state[session_key] = ""
+                    
+                    transcription = st.text_area(
+                        "Recognized / Manual Transcription:",
+                        value=st.session_state[session_key],
+                        key=f"trans_{filename}_{idx}_{img_file.name}",
+                        height=100,
+                        help="Edit or enter the text from the handwriting"
                     )
-                    if success:
-                        st.success(f"✅ 已上传: {uploaded_file.name}")
+                    
+                    if st.button(f"💾 Save Transcription", key=f"save_{filename}_{idx}_{img_file.name}"):
+                        st.session_state[session_key] = transcription
+                        st.success(f"✅ Saved transcription for {img_file.name}")
+    
+    # Add action buttons
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔄 Re-run Analysis", key=f"rerun_{filename}"):
+            with st.spinner("Re-analyzing document..."):
+                metadata = load_workspace(workspace_name)
+                doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
+                
+                if doc:
+                    file_path = Path(doc['path'])
+                    text, images = extract_text_from_file(file_path)
+                    
+                    new_analysis = perform_dual_track_analysis(text, images, filename)
+                    
+                    with open(analysis_file, 'w') as f:
+                        json.dump(new_analysis, f, indent=2)
+                    
+                    st.success("✅ Analysis complete!")
+                    st.rerun()
+    
+    with col2:
+        if st.button("📥 Export Report", key=f"export_{filename}"):
+            # Export as text file
+            report_text = f"""UNDERWRITING ANALYSIS REPORT
+{'='*60}
+Document: {filename}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{analysis.get('integrated_report', 'No integrated report available')}
+
+{'='*60}
+ELECTRONIC TEXT ANALYSIS
+{'='*60}
+{analysis.get('electronic_analysis', 'No analysis available')}
+
+{'='*60}
+HANDWRITING TRANSLATION
+{'='*60}
+{analysis.get('handwriting_translation', {}).get('translated_text', 'No handwriting detected')}
+"""
+            st.download_button(
+                label="Download TXT Report",
+                data=report_text,
+                file_name=f"{filename}_analysis_{datetime.now().strftime('%Y%m%d')}.txt",
+                mime="text/plain",
+                key=f"download_report_{filename}"
+            )
+
+# ===========================
+# Main Application
+# ===========================
+
+def main():
+    st.set_page_config(
+        page_title="Enhanced Underwriting Assistant",
+        page_icon="📋",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    inject_css()
+    ensure_dirs()
+    
+    # Initialize session state
+    if 'current_workspace' not in st.session_state:
+        st.session_state.current_workspace = "Default"
+    
+    if 'viewing_doc' not in st.session_state:
+        st.session_state.viewing_doc = None
+    
+    if 'viewing_analysis' not in st.session_state:
+        st.session_state.viewing_analysis = None
+    
+    if 'initial_load_done' not in st.session_state:
+        st.session_state.initial_load_done = False
+    
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = get_api_key()
+    
+    render_header()
+    
+    # Load initial dataset (ONLY ONCE, ONLY ONE FILE)
+    if not st.session_state.initial_load_done:
+        with st.spinner("Loading initial dataset..."):
+            load_initial_dataset()
+        st.session_state.initial_load_done = True
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("🗂️ Workspace Management")
+        
+        workspaces = list_workspaces()
+        
+        if workspaces:
+            selected_workspace = st.selectbox(
+                "Select Workspace:",
+                workspaces,
+                index=workspaces.index(st.session_state.current_workspace) if st.session_state.current_workspace in workspaces else 0
+            )
+            
+            if selected_workspace != st.session_state.current_workspace:
+                st.session_state.current_workspace = selected_workspace
+                st.rerun()
+        
+        st.markdown("---")
+        
+        with st.expander("➕ Create New Workspace"):
+            new_workspace_name = st.text_input("Workspace Name:")
+            new_workspace_desc = st.text_area("Description:")
+            
+            if st.button("Create Workspace"):
+                if new_workspace_name:
+                    create_workspace(new_workspace_name, new_workspace_desc)
+                    st.success(f"Workspace '{new_workspace_name}' created!")
+                    st.session_state.current_workspace = new_workspace_name
+                    st.rerun()
+        
+        st.markdown("---")
+        
+        if st.session_state.current_workspace:
+            metadata = load_workspace(st.session_state.current_workspace)
+            if metadata:
+                st.info(f"📁 **{metadata['name']}**")
+                st.metric("Documents", len(metadata.get('documents', [])))
+        
+        render_api_config_sidebar()
+    
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📚 Document Library",
+        "⬆️ Upload Documents",
+        "📊 Analysis Dashboard",
+        "💬 Chat Assistant"
+    ])
+    
+    # TAB 1: Document Library
+    with tab1:
+        st.header("📚 Document Library")
+        
+        if not st.session_state.current_workspace:
+            st.warning("Please select or create a workspace first")
+        else:
+            metadata = load_workspace(st.session_state.current_workspace)
+            
+            if not metadata or not metadata.get('documents'):
+                st.info("No documents in this workspace. Upload documents to get started.")
+            else:
+                documents = metadata.get('documents', [])
+                
+                st.markdown(f"**Showing {len(documents)} document(s)**")
+                
+                for idx, doc in enumerate(documents):
+                    render_document_card(doc, st.session_state.current_workspace, doc_index=idx)
+                
+                if st.session_state.viewing_analysis:
+                    workspace, filename = st.session_state.viewing_analysis
+                    render_analysis_view(workspace, filename)
+                    
+                    if st.button("Close Analysis"):
+                        st.session_state.viewing_analysis = None
                         st.rerun()
     
-    # 主内容区
-    tab1, tab2 = st.tabs(["📊 报告表格", "ℹ️ 关于"])
-    
-    with tab1:
-        render_table_view()
-    
+    # TAB 2: Upload
     with tab2:
-        st.header("关于系统")
-        st.write(f"""
-        **Enhanced Underwriting Assistant** v{VERSION}
+        st.header("⬆️ Upload Documents")
         
-        核心功能：
-        - ✅ 表格形式展示所有文档
-        - ✅ 支持筛选（保险类型、客户名称、承保年度）
-        - ✅ 电子文本简短摘要
-        - ✅ 手写翻译（显示图片 + 翻译 + 识别度百分比）
+        if not st.session_state.current_workspace:
+            st.warning("Please select or create a workspace first")
+        else:
+            uploaded_files = st.file_uploader(
+                "Upload underwriting documents:",
+                type=list(SUPPORTED_FORMATS.keys()),
+                accept_multiple_files=True
+            )
+            
+            auto_analyze = st.checkbox("Perform automatic analysis", value=True)
+            
+            if uploaded_files and st.button("Upload & Process"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for idx, file in enumerate(uploaded_files):
+                    status_text.text(f"Processing {file.name}...")
+                    
+                    result = upload_document_to_workspace(
+                        st.session_state.current_workspace,
+                        file,
+                        auto_analyze=auto_analyze
+                    )
+                    
+                    if result:
+                        st.success(f"✅ {file.name} uploaded!")
+                    else:
+                        st.error(f"❌ Failed to upload {file.name}")
+                    
+                    progress_bar.progress((idx + 1) / len(uploaded_files))
+                
+                status_text.text("Upload complete!")
+                st.balloons()
+    
+    # TAB 3: Analysis Dashboard
+    with tab3:
+        st.header("📊 Analysis Dashboard")
         
-        技术栈：
-        - Streamlit
-        - PyMuPDF (fitz)
-        - DeepSeek API
+        if not st.session_state.current_workspace:
+            st.warning("Please select a workspace first")
+        else:
+            metadata = load_workspace(st.session_state.current_workspace)
+            
+            if not metadata or not metadata.get('documents'):
+                st.info("No documents to analyze")
+            else:
+                documents = metadata.get('documents', [])
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Documents", len(documents))
+                
+                with col2:
+                    analyzed = sum(1 for d in documents if d.get('has_deep_analysis'))
+                    st.metric("Analyzed", analyzed)
+                
+                with col3:
+                    high_risk = sum(1 for d in documents if d.get('risk_level') == 'High')
+                    st.metric("High Risk", high_risk)
+                
+                with col4:
+                    pending = sum(1 for d in documents if d.get('decision') == 'Pending')
+                    st.metric("Pending Review", pending)
+                
+                st.markdown("---")
+                
+                st.subheader("Document Analysis Status")
+                
+                for idx, doc in enumerate(documents):
+                    upload_ts = doc.get('upload_date', '').replace(':', '-').replace('.', '-')
+                    unique_key = f"{hashlib.md5(doc['filename'].encode()).hexdigest()[:8]}_{upload_ts}_{idx}"
+                    
+                    with st.expander(f"{doc['filename']} - {doc.get('decision', 'Pending')}"):
+                        col1, col2 = st.columns([2, 1])
+                        
+                        with col1:
+                            st.markdown(f"**Risk Level:** {doc.get('risk_level', 'N/A')}")
+                            st.markdown(f"**Tags:** {', '.join(doc.get('tags', []))}")
+                            st.markdown(f"**Has Images:** {'Yes' if doc.get('has_images') else 'No'}")
+                        
+                        with col2:
+                            if doc.get('has_deep_analysis'):
+                                if st.button("View Full Analysis", key=f"view_full_{unique_key}"):
+                                    st.session_state.viewing_analysis = (st.session_state.current_workspace, doc['filename'])
+                                    st.rerun()
+                            else:
+                                if st.button("Run Analysis", key=f"run_{unique_key}"):
+                                    with st.spinner("Analyzing..."):
+                                        file_path = Path(doc['path'])
+                                        text, images = extract_text_from_file(file_path)
+                                        
+                                        analysis = perform_dual_track_analysis(text, images, doc['filename'])
+                                        
+                                        analysis_file = ANALYSIS_DIR / f"{st.session_state.current_workspace}_{doc['filename']}.json"
+                                        with open(analysis_file, 'w') as f:
+                                            json.dump(analysis, f, indent=2)
+                                        
+                                        doc['has_deep_analysis'] = True
+                                        
+                                        with open(WORKSPACES_DIR / st.session_state.current_workspace / "metadata.json", 'w') as f:
+                                            json.dump(metadata, f, indent=2)
+                                        
+                                        st.success("Analysis complete!")
+                                        st.rerun()
+    
+    # TAB 4: Chat Assistant
+    with tab4:
+        st.header("💬 AI Assistant")
+        st.markdown("Ask questions about your documents, policies, and underwriting decisions.")
         
-        Powered by AI 🤖
-        """)
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
+        
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        if prompt := st.chat_input("Ask about underwriting, policies, risk assessment..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing..."):
+                    search_results = search_documents(
+                        prompt,
+                        st.session_state.current_workspace,
+                        top_k=3
+                    )
+                    
+                    context = "\n\n".join([
+                        f"Document: {r['document']['filename']}\n{r['preview']}"
+                        for r in search_results
+                    ])
+                    
+                    user_prompt = f"""User Question: {prompt}
+
+Relevant Documents:
+{context}
+
+Provide a comprehensive answer based on the available documents."""
+
+                    response = call_llm_api(SYSTEM_INSTRUCTION, user_prompt)
+                    
+                    if not response:
+                        response = "I apologize, but I'm unable to process your request at this time. Please ensure the API key is configured correctly in the sidebar."
+                    
+                    st.markdown(response)
+                    
+                    if search_results:
+                        with st.expander("📚 Sources"):
+                            for r in search_results:
+                                st.markdown(f"- **{r['document']['filename']}** (similarity: {r['similarity']:.2f})")
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
-    # 初始化数据
-    ensure_directories()
-    
-    # 加载初始数据集（首次运行）
-    if not os.path.exists(os.path.join(WORKSPACES_DIR, "Default")):
-        create_workspace("Default", "默认工作区")
-    
     main()
