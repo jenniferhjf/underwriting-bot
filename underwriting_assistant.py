@@ -16,7 +16,7 @@ import base64
 # ===========================
 
 VERSION = "2.7"
-APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
+APP_TITLE = "Enhanced Underwriting Assistant - Professional"
 
 # API Configuration
 DEFAULT_API_KEY = os.getenv("API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
