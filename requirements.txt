@@ -8,8 +8,6 @@ requests
 sentence-transformers
 faiss-cpu
 rank_bm25
-pytesseract
 easyocr
 opencv-python-headless
-torch
-torchvision
+pytesseract
