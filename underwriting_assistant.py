@@ -1,14 +1,16 @@
 """
-Professional Underwriting Assistant with Full RAG Pipeline
-==========================================================
+Professional Underwriting RAG System with Handwriting Recognition
+=================================================================
 
-Features:
-- Multi-format document extraction (PDF, DOCX, XLSX, PPTX)
-- Text chunking with overlap
-- Embedding generation (OpenAI/Local models)
-- Vector database (FAISS/ChromaDB)
-- Semantic search with reranking
-- LLM integration with context
+Complete Pipeline:
+1. Load preset datasets
+2. Detect handwritten vs printed text
+3. OCR processing for both types
+4. Text chunking with overlap
+5. Embedding generation
+6. Vector database indexing
+7. Semantic search with reranking
+8. LLM-powered question answering
 """
 
 import streamlit as st
@@ -17,105 +19,250 @@ import json
 from datetime import datetime
 from pathlib import Path
 import hashlib
-import re
 from typing import List, Dict, Any, Optional, Tuple
-import pandas as pd
+import io
 
-# Document Processing
+# Document & Image Processing
 import PyPDF2
+from pdf2image import convert_from_path
 from docx import Document as DocxDocument
-from pptx import Presentation
-import openpyxl
+from PIL import Image
+import cv2
+import numpy as np
+
+# OCR
+import easyocr
+import pytesseract
 
 # RAG Components
-import faiss
-import numpy as np
 from sentence_transformers import SentenceTransformer
+import faiss
 from rank_bm25 import BM25Okapi
 import requests
+import pandas as pd
 
 # ===========================
 # Configuration
 # ===========================
 
-VERSION = "3.0.0-RAG"
-APP_TITLE = "Professional Underwriting Assistant - RAG System"
+VERSION = "4.0.0-FINAL"
+APP_TITLE = "Underwriting Repository - RAG with Handwriting Recognition"
+
+# Preset Datasets (Default cases to load)
+PRESET_DATASETS = [
+    "Cargo - Agnes Fisheries - CE's notes for Yr 2021-22.pdf",
+    "Hull - Marco Polo_Memo.pdf",
+    "Cargo - Mitsui Co summary with CE's QA 29.8.22.docx"
+]
 
 # API Configuration
-DEFAULT_API_KEY = os.getenv("API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
+DEFAULT_API_KEY = "sk-99bba2ce117444e197270f17d303e74f"
 API_BASE = "https://api.deepseek.com/v1"
 API_MODEL = "deepseek-chat"
 
 # RAG Configuration
-CHUNK_SIZE = 512  # Characters per chunk
-CHUNK_OVERLAP = 128  # Overlap between chunks
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Sentence transformer model
-TOP_K_RETRIEVAL = 10  # Initial retrieval
-TOP_K_RERANK = 3  # After reranking
+CHUNK_SIZE = 512
+CHUNK_OVERLAP = 128
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+TOP_K_RETRIEVAL = 10
+TOP_K_RERANK = 3
 
-# Directory Structure
+# OCR Configuration
+TESSERACT_LANG = "eng+chi_sim"
+EASYOCR_LANGS = ['en', 'ch_sim']
+
+# Directories
 DATA_DIR = Path("data")
-WORKSPACES_DIR = DATA_DIR / "workspaces"
+UPLOADS_DIR = DATA_DIR / "uploads"
+PROCESSED_DIR = DATA_DIR / "processed"
 VECTOR_DB_DIR = DATA_DIR / "vector_db"
-EMBEDDINGS_DIR = DATA_DIR / "embeddings"
-CHUNKS_DIR = DATA_DIR / "chunks"
-
-# Supported formats
-SUPPORTED_FORMATS = {
-    'pdf': '📄 PDF',
-    'docx': '📝 Word',
-    'xlsx': '📊 Excel',
-    'pptx': '📽️ PowerPoint',
-    'txt': '📃 Text'
-}
+OCR_RESULTS_DIR = DATA_DIR / "ocr_results"
 
 # ===========================
-# Initialize Components
+# Directory Setup
+# ===========================
+
+def ensure_directories():
+    """Create necessary directories"""
+    for dir_path in [DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, VECTOR_DB_DIR, OCR_RESULTS_DIR]:
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+# ===========================
+# Model Loading
 # ===========================
 
 @st.cache_resource
 def load_embedding_model():
-    """Load sentence transformer model for embeddings"""
+    """Load embedding model"""
     return SentenceTransformer(EMBEDDING_MODEL)
 
-def ensure_dirs():
-    """Create necessary directories"""
-    for dir_path in [WORKSPACES_DIR, VECTOR_DB_DIR, EMBEDDINGS_DIR, CHUNKS_DIR]:
-        dir_path.mkdir(parents=True, exist_ok=True)
+@st.cache_resource
+def load_ocr_reader():
+    """Load EasyOCR reader"""
+    return easyocr.Reader(EASYOCR_LANGS, gpu=False)
 
 # ===========================
-# Document Extraction
+# Step 1: Text Extraction & OCR
 # ===========================
 
-def extract_text_from_pdf(file_path: Path) -> str:
-    """Extract text from PDF"""
+def convert_pdf_to_images(file_path: Path) -> List[Image.Image]:
+    """Convert PDF pages to images for OCR processing"""
     try:
-        text_parts = []
-        with open(file_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            for page_num, page in enumerate(pdf_reader.pages):
-                text = page.extract_text()
-                if text:
-                    text_parts.append(f"[Page {page_num + 1}]\n{text}")
-        return "\n\n".join(text_parts)
+        images = convert_from_path(str(file_path), dpi=200)
+        return images
     except Exception as e:
-        st.error(f"PDF extraction error: {e}")
+        st.error(f"PDF to image conversion error: {e}")
+        return []
+
+def detect_handwritten_regions(image_np: np.ndarray, min_width=50, min_height=20) -> List[Dict]:
+    """
+    Detect potential handwritten regions in image
+    Uses contour detection to find text regions
+    """
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+    )
+    
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    regions = []
+    for idx, contour in enumerate(contours):
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        if w > min_width and h > min_height:
+            region = {
+                'region_id': idx,
+                'bbox': (x, y, w, h),
+                'area': w * h,
+                'aspect_ratio': w / h if h > 0 else 0
+            }
+            regions.append(region)
+    
+    return regions
+
+def classify_text_type(image_crop: np.ndarray) -> str:
+    """
+    Classify if text region is handwritten or printed
+    Uses edge density heuristic
+    """
+    gray = cv2.cvtColor(image_crop, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = np.sum(edges > 0) / edges.size
+    
+    # Simple heuristic: handwritten has more irregular edges
+    if edge_density > 0.15:
+        return "handwritten"
+    else:
+        return "printed"
+
+def perform_ocr(image: Image.Image, reader: easyocr.Reader, text_type: str = "printed") -> str:
+    """
+    Perform OCR on image
+    Uses EasyOCR for handwritten, Tesseract for printed
+    """
+    try:
+        image_np = np.array(image)
+        
+        if text_type == "handwritten":
+            # EasyOCR better for handwritten
+            results = reader.readtext(image_np)
+            text = " ".join([detection[1] for detection in results])
+        else:
+            # Tesseract for printed text
+            text = pytesseract.image_to_string(image, lang=TESSERACT_LANG)
+        
+        return text.strip()
+    except Exception as e:
+        st.error(f"OCR error: {e}")
         return ""
 
+def process_pdf_with_ocr(file_path: Path, doc_id: str, reader: easyocr.Reader) -> Dict:
+    """
+    Complete PDF processing with handwriting detection
+    
+    Pipeline:
+    1. Convert PDF to images
+    2. Detect handwritten regions
+    3. Classify each region
+    4. Perform OCR (appropriate method)
+    5. Save results
+    """
+    results = {
+        'doc_id': doc_id,
+        'filename': file_path.name,
+        'pages': []
+    }
+    
+    # Convert to images
+    images = convert_pdf_to_images(file_path)
+    
+    if not images:
+        return results
+    
+    progress_bar = st.progress(0)
+    
+    for page_idx, page_image in enumerate(images):
+        page_result = {
+            'page_num': page_idx + 1,
+            'full_printed_text': "",
+            'handwritten_regions': []
+        }
+        
+        image_np = np.array(page_image)
+        
+        # Full page OCR for printed text
+        full_page_text = perform_ocr(page_image, reader, "printed")
+        page_result['full_printed_text'] = full_page_text
+        
+        # Detect handwritten regions
+        regions = detect_handwritten_regions(image_np)
+        
+        for region in regions:
+            x, y, w, h = region['bbox']
+            crop = image_np[y:y+h, x:x+w]
+            
+            # Classify region
+            text_type = classify_text_type(crop)
+            
+            if text_type == "handwritten":
+                # OCR handwritten region
+                crop_pil = Image.fromarray(crop)
+                ocr_text = perform_ocr(crop_pil, reader, "handwritten")
+                
+                if ocr_text:
+                    # Save handwritten region image
+                    region_img_path = OCR_RESULTS_DIR / f"{doc_id}_p{page_idx+1}_r{region['region_id']}.png"
+                    crop_pil.save(region_img_path)
+                    
+                    page_result['handwritten_regions'].append({
+                        'region_id': region['region_id'],
+                        'bbox': region['bbox'],
+                        'text': ocr_text,
+                        'image_path': str(region_img_path)
+                    })
+        
+        results['pages'].append(page_result)
+        progress_bar.progress((page_idx + 1) / len(images))
+    
+    # Save OCR results
+    results_path = OCR_RESULTS_DIR / f"{doc_id}_results.json"
+    with open(results_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    
+    return results
+
 def extract_text_from_docx(file_path: Path) -> str:
-    """Extract text from DOCX including tables"""
+    """Extract text from DOCX"""
     try:
         doc = DocxDocument(file_path)
         text_parts = []
         
-        # Extract paragraphs
         for para in doc.paragraphs:
             if para.text.strip():
                 text_parts.append(para.text)
         
-        # Extract tables
-        for table_idx, table in enumerate(doc.tables):
-            text_parts.append(f"\n[Table {table_idx + 1}]")
+        for table in doc.tables:
             for row in table.rows:
                 row_data = [cell.text.strip() for cell in row.cells]
                 text_parts.append(" | ".join(row_data))
@@ -125,214 +272,113 @@ def extract_text_from_docx(file_path: Path) -> str:
         st.error(f"DOCX extraction error: {e}")
         return ""
 
-def extract_text_from_xlsx(file_path: Path) -> str:
-    """Extract text from Excel"""
-    try:
-        wb = openpyxl.load_workbook(file_path)
-        text_parts = []
-        
-        for sheet_name in wb.sheetnames:
-            sheet = wb[sheet_name]
-            text_parts.append(f"\n[Sheet: {sheet_name}]")
-            
-            for row in sheet.iter_rows(values_only=True):
-                row_text = " | ".join([str(cell) if cell is not None else "" for cell in row])
-                if row_text.strip():
-                    text_parts.append(row_text)
-        
-        return "\n".join(text_parts)
-    except Exception as e:
-        st.error(f"Excel extraction error: {e}")
-        return ""
-
-def extract_text_from_pptx(file_path: Path) -> str:
-    """Extract text from PowerPoint"""
-    try:
-        prs = Presentation(file_path)
-        text_parts = []
-        
-        for slide_idx, slide in enumerate(prs.slides):
-            text_parts.append(f"\n[Slide {slide_idx + 1}]")
-            
-            for shape in slide.shapes:
-                if hasattr(shape, "text") and shape.text:
-                    text_parts.append(shape.text)
-        
-        return "\n".join(text_parts)
-    except Exception as e:
-        st.error(f"PowerPoint extraction error: {e}")
-        return ""
-
-def extract_text_from_txt(file_path: Path) -> str:
-    """Extract text from TXT"""
-    try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            return f.read()
-    except Exception as e:
-        st.error(f"TXT extraction error: {e}")
-        return ""
-
-def extract_text_from_file(file_path: Path) -> str:
-    """Route extraction based on file type"""
-    ext = file_path.suffix.lower().lstrip('.')
-    
-    extractors = {
-        'pdf': extract_text_from_pdf,
-        'docx': extract_text_from_docx,
-        'xlsx': extract_text_from_xlsx,
-        'pptx': extract_text_from_pptx,
-        'txt': extract_text_from_txt
-    }
-    
-    extractor = extractors.get(ext)
-    if extractor:
-        return extractor(file_path)
-    else:
-        st.error(f"Unsupported format: {ext}")
-        return ""
-
 # ===========================
-# Text Chunking
+# Step 2: Text Chunking
 # ===========================
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[Dict[str, Any]]:
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[Dict]:
     """
     Split text into overlapping chunks
     
+    Args:
+        text: Input text
+        chunk_size: Characters per chunk
+        overlap: Overlap between chunks
+        
     Returns:
-        List of chunks with metadata
+        List of chunk dictionaries
     """
     if not text:
         return []
     
     chunks = []
     start = 0
-    text_length = len(text)
     chunk_id = 0
     
-    while start < text_length:
+    while start < len(text):
         end = start + chunk_size
-        
-        # Extract chunk
         chunk_text = text[start:end]
         
         # Try to break at sentence boundary
-        if end < text_length:
-            # Look for sentence ending
+        if end < len(text):
             last_period = chunk_text.rfind('.')
             last_newline = chunk_text.rfind('\n')
             break_point = max(last_period, last_newline)
             
-            if break_point > chunk_size * 0.5:  # At least 50% of chunk
+            if break_point > chunk_size * 0.5:
                 end = start + break_point + 1
                 chunk_text = text[start:end]
         
-        # Create chunk metadata
-        chunk = {
+        chunks.append({
             'chunk_id': chunk_id,
             'text': chunk_text.strip(),
             'start_char': start,
-            'end_char': end,
-            'length': len(chunk_text)
-        }
+            'end_char': end
+        })
         
-        chunks.append(chunk)
-        
-        # Move to next chunk with overlap
         start = end - overlap
         chunk_id += 1
     
     return chunks
 
 # ===========================
-# Embedding Generation
+# Step 3: Embedding Generation
 # ===========================
 
 def generate_embeddings(texts: List[str], model: SentenceTransformer) -> np.ndarray:
-    """
-    Generate embeddings for a list of texts
-    
-    Args:
-        texts: List of text strings
-        model: Sentence transformer model
-        
-    Returns:
-        Numpy array of embeddings
-    """
-    embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+    """Generate embeddings for text chunks"""
+    embeddings = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
     return embeddings
 
 # ===========================
-# Vector Database (FAISS)
+# Step 4: Vector Database
 # ===========================
 
 class VectorDatabase:
     """FAISS-based vector database for semantic search"""
     
     def __init__(self, dimension: int = 384):
-        """
-        Initialize FAISS index
-        
-        Args:
-            dimension: Embedding dimension (384 for all-MiniLM-L6-v2)
-        """
         self.dimension = dimension
-        self.index = faiss.IndexFlatIP(dimension)  # Inner product (cosine similarity)
+        self.index = faiss.IndexFlatIP(dimension)
         self.chunks = []
         self.doc_metadata = {}
     
-    def add_documents(self, chunks: List[Dict], embeddings: np.ndarray, doc_id: str, doc_name: str):
-        """
-        Add document chunks to vector database
-        
-        Args:
-            chunks: List of chunk dictionaries
-            embeddings: Numpy array of embeddings
-            doc_id: Document identifier
-            doc_name: Document name
-        """
-        # Normalize embeddings for cosine similarity
+    def add_documents(self, chunks: List[Dict], embeddings: np.ndarray, 
+                     doc_id: str, doc_name: str, source_type: str = "printed"):
+        """Add document chunks to vector database"""
         faiss.normalize_L2(embeddings)
-        
-        # Add to FAISS index
         self.index.add(embeddings)
         
-        # Store chunks with metadata
         for chunk, embedding in zip(chunks, embeddings):
             chunk['doc_id'] = doc_id
             chunk['doc_name'] = doc_name
-            chunk['embedding_norm'] = np.linalg.norm(embedding)
+            chunk['source_type'] = source_type
             self.chunks.append(chunk)
         
-        # Store document metadata
-        self.doc_metadata[doc_id] = {
-            'doc_name': doc_name,
-            'num_chunks': len(chunks),
-            'added_at': datetime.now().isoformat()
-        }
+        if doc_id not in self.doc_metadata:
+            self.doc_metadata[doc_id] = {
+                'doc_name': doc_name,
+                'num_chunks': 0,
+                'printed_chunks': 0,
+                'handwritten_chunks': 0
+            }
+        
+        self.doc_metadata[doc_id]['num_chunks'] += len(chunks)
+        if source_type == "printed":
+            self.doc_metadata[doc_id]['printed_chunks'] += len(chunks)
+        else:
+            self.doc_metadata[doc_id]['handwritten_chunks'] += len(chunks)
     
     def search(self, query_embedding: np.ndarray, top_k: int = TOP_K_RETRIEVAL) -> List[Tuple[Dict, float]]:
-        """
-        Search for similar chunks
-        
-        Args:
-            query_embedding: Query embedding vector
-            top_k: Number of results to return
-            
-        Returns:
-            List of (chunk, similarity_score) tuples
-        """
+        """Search for similar chunks"""
         if self.index.ntotal == 0:
             return []
         
-        # Normalize query
         query_embedding = query_embedding.reshape(1, -1).astype('float32')
         faiss.normalize_L2(query_embedding)
         
-        # Search
         similarities, indices = self.index.search(query_embedding, min(top_k, self.index.ntotal))
         
-        # Prepare results
         results = []
         for similarity, idx in zip(similarities[0], indices[0]):
             if idx < len(self.chunks):
@@ -340,128 +386,93 @@ class VectorDatabase:
         
         return results
     
-    def save(self, workspace_name: str):
-        """Save index and metadata"""
-        save_dir = VECTOR_DB_DIR / workspace_name
-        save_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save FAISS index
-        faiss.write_index(self.index, str(save_dir / "faiss.index"))
-        
-        # Save chunks and metadata
-        with open(save_dir / "chunks.json", 'w', encoding='utf-8') as f:
-            json.dump(self.chunks, f, ensure_ascii=False, indent=2)
-        
-        with open(save_dir / "metadata.json", 'w', encoding='utf-8') as f:
-            json.dump(self.doc_metadata, f, indent=2)
-    
-    def load(self, workspace_name: str):
-        """Load index and metadata"""
-        load_dir = VECTOR_DB_DIR / workspace_name
-        
-        if not load_dir.exists():
-            return False
-        
-        try:
-            # Load FAISS index
-            self.index = faiss.read_index(str(load_dir / "faiss.index"))
-            
-            # Load chunks
-            with open(load_dir / "chunks.json", 'r', encoding='utf-8') as f:
-                self.chunks = json.load(f)
-            
-            # Load metadata
-            with open(load_dir / "metadata.json", 'r', encoding='utf-8') as f:
-                self.doc_metadata = json.load(f)
-            
-            return True
-        except Exception as e:
-            st.error(f"Error loading vector database: {e}")
-            return False
-    
     def get_stats(self) -> Dict:
         """Get database statistics"""
+        total_printed = sum(meta['printed_chunks'] for meta in self.doc_metadata.values())
+        total_handwritten = sum(meta['handwritten_chunks'] for meta in self.doc_metadata.values())
+        
         return {
             'total_chunks': self.index.ntotal,
             'total_documents': len(self.doc_metadata),
+            'printed_chunks': total_printed,
+            'handwritten_chunks': total_handwritten,
             'dimension': self.dimension
         }
+    
+    def save(self, path: Path):
+        """Save vector database"""
+        path.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.index, str(path / "faiss.index"))
+        
+        with open(path / "chunks.json", 'w', encoding='utf-8') as f:
+            json.dump(self.chunks, f, ensure_ascii=False, indent=2)
+        
+        with open(path / "metadata.json", 'w', encoding='utf-8') as f:
+            json.dump(self.doc_metadata, f, indent=2)
+    
+    def load(self, path: Path) -> bool:
+        """Load vector database"""
+        try:
+            self.index = faiss.read_index(str(path / "faiss.index"))
+            
+            with open(path / "chunks.json", 'r', encoding='utf-8') as f:
+                self.chunks = json.load(f)
+            
+            with open(path / "metadata.json", 'r', encoding='utf-8') as f:
+                self.doc_metadata = json.load(f)
+            
+            return True
+        except:
+            return False
 
 # ===========================
-# Reranking
+# Step 5-6: BM25 Reranking
 # ===========================
 
 class BM25Reranker:
-    """BM25-based reranker for retrieved chunks"""
+    """BM25 reranker for retrieved chunks"""
     
     def __init__(self):
         self.bm25 = None
-        self.corpus_texts = []
     
     def fit(self, texts: List[str]):
-        """Fit BM25 on corpus"""
-        tokenized_corpus = [text.lower().split() for text in texts]
-        self.bm25 = BM25Okapi(tokenized_corpus)
-        self.corpus_texts = texts
+        tokenized = [text.lower().split() for text in texts]
+        self.bm25 = BM25Okapi(tokenized)
     
-    def rerank(self, query: str, candidates: List[Tuple[Dict, float]], top_k: int = TOP_K_RERANK) -> List[Tuple[Dict, float]]:
-        """
-        Rerank candidates using BM25
+    def rerank(self, query: str, candidates: List[Tuple[Dict, float]], 
+              top_k: int = TOP_K_RERANK) -> List[Tuple[Dict, float]]:
+        """Rerank candidates using BM25"""
+        if not candidates:
+            return []
         
-        Args:
-            query: Query string
-            candidates: List of (chunk, score) tuples
-            top_k: Number of results to return
-            
-        Returns:
-            Reranked list of (chunk, combined_score) tuples
-        """
-        if not candidates or not self.bm25:
-            return candidates[:top_k]
+        texts = [chunk['text'] for chunk, _ in candidates]
+        self.fit(texts)
         
-        # Get BM25 scores
         tokenized_query = query.lower().split()
-        candidate_texts = [chunk['text'] for chunk, _ in candidates]
-        
-        # Fit BM25 on candidates if needed
-        if not self.corpus_texts or set(candidate_texts) != set(self.corpus_texts):
-            self.fit(candidate_texts)
-        
         bm25_scores = self.bm25.get_scores(tokenized_query)
         
-        # Combine with vector similarity scores
-        combined_results = []
+        combined = []
         for (chunk, vec_score), bm25_score in zip(candidates, bm25_scores):
-            # Weighted combination: 60% vector similarity, 40% BM25
             combined_score = 0.6 * vec_score + 0.4 * (bm25_score / (max(bm25_scores) + 1e-6))
-            combined_results.append((chunk, combined_score))
+            combined.append((chunk, combined_score))
         
-        # Sort by combined score
-        combined_results.sort(key=lambda x: x[1], reverse=True)
-        
-        return combined_results[:top_k]
+        combined.sort(key=lambda x: x[1], reverse=True)
+        return combined[:top_k]
 
 # ===========================
-# Prompt Template
+# Step 7: Prompt Template
 # ===========================
 
 def create_rag_prompt(query: str, context_chunks: List[Tuple[Dict, float]]) -> str:
-    """
-    Create prompt with retrieved context
-    
-    Args:
-        query: User query
-        context_chunks: List of (chunk, score) tuples
-        
-    Returns:
-        Formatted prompt string
-    """
-    # Build context section
+    """Create RAG prompt with retrieved context"""
     context_parts = []
     for idx, (chunk, score) in enumerate(context_chunks, 1):
+        source_label = "🖨️ PRINTED" if chunk.get('source_type') == 'printed' else "✍️ HANDWRITTEN"
         context_parts.append(f"""
+[Source {idx}] {source_label}
 Document: {chunk['doc_name']}
-Chunk {chunk['chunk_id']} (Relevance: {score:.3f})
+Chunk ID: {chunk['chunk_id']}
+Relevance: {score:.3f}
 ---
 {chunk['text']}
 ---
@@ -469,8 +480,7 @@ Chunk {chunk['chunk_id']} (Relevance: {score:.3f})
     
     context_text = "\n".join(context_parts)
     
-    # Create full prompt
-    prompt = f"""You are a professional underwriting assistant. Use the following retrieved context to answer the user's question.
+    prompt = f"""You are a professional underwriting assistant. Answer based on the retrieved context below.
 
 RETRIEVED CONTEXT:
 {context_text}
@@ -480,26 +490,23 @@ USER QUESTION:
 
 INSTRUCTIONS:
 1. Answer based ONLY on the provided context
-2. Cite the specific document and chunk number when referencing information
-3. If the context doesn't contain enough information, say so clearly
-4. Provide specific details like amounts, dates, and terms when available
-5. Keep your answer concise and professional
+2. Cite source number and type (PRINTED/HANDWRITTEN)
+3. If insufficient information, state clearly
+4. Be specific with amounts, dates, terms
+5. Note handwritten sources may have OCR errors
 
 ANSWER:"""
     
     return prompt
 
 # ===========================
-# LLM API Call
+# Step 8: LLM API Call
 # ===========================
 
-def call_llm_api(prompt: str, temperature: float = 0.3, max_tokens: int = 2000) -> str:
-    """Call LLM API with context"""
+def call_llm_api(prompt: str) -> str:
+    """Call LLM API for answer generation"""
     try:
         api_key = st.session_state.get('api_key', DEFAULT_API_KEY)
-        
-        if not api_key:
-            return "Error: API key not configured"
         
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -508,11 +515,9 @@ def call_llm_api(prompt: str, temperature: float = 0.3, max_tokens: int = 2000) 
         
         payload = {
             "model": API_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 2000
         }
         
         response = requests.post(
@@ -523,176 +528,144 @@ def call_llm_api(prompt: str, temperature: float = 0.3, max_tokens: int = 2000) 
         )
         
         response.raise_for_status()
-        result = response.json()
-        
-        return result['choices'][0]['message']['content']
+        return response.json()['choices'][0]['message']['content']
         
     except Exception as e:
-        return f"Error calling LLM: {e}"
+        return f"Error: {e}"
 
 # ===========================
-# RAG Pipeline
+# Complete RAG Pipeline
 # ===========================
 
-def rag_query(query: str, vector_db: VectorDatabase, embedding_model: SentenceTransformer, 
-              reranker: BM25Reranker) -> Dict[str, Any]:
+def rag_query(query: str, vector_db: VectorDatabase, embedding_model: SentenceTransformer,
+              reranker: BM25Reranker) -> Dict:
     """
-    Complete RAG pipeline
+    Complete RAG pipeline execution
     
-    Args:
-        query: User query
-        vector_db: Vector database instance
-        embedding_model: Embedding model
-        reranker: Reranker instance
-        
-    Returns:
-        Dictionary with answer and metadata
+    Steps:
+    5. Query embedding
+    6. Vector search (retrieve top-k)
+    7. BM25 reranking
+    8. Prompt assembly and LLM call
     """
-    # Step 1: Generate query embedding
+    # Step 5: Query embedding
     query_embedding = embedding_model.encode([query])[0]
     
-    # Step 2: Retrieve top-k chunks
+    # Step 6: Retrieve top-k chunks
     candidates = vector_db.search(query_embedding, top_k=TOP_K_RETRIEVAL)
     
     if not candidates:
         return {
-            'answer': "No relevant documents found in the database.",
+            'answer': "No relevant documents found.",
             'sources': [],
-            'num_candidates': 0,
-            'num_reranked': 0
+            'num_candidates': 0
         }
     
-    # Step 3: Rerank
-    reranked_chunks = reranker.rerank(query, candidates, top_k=TOP_K_RERANK)
+    # Step 7: Rerank
+    reranked = reranker.rerank(query, candidates, top_k=TOP_K_RERANK)
     
-    # Step 4: Create prompt
-    prompt = create_rag_prompt(query, reranked_chunks)
-    
-    # Step 5: Generate answer with LLM
+    # Step 8: Create prompt and call LLM
+    prompt = create_rag_prompt(query, reranked)
     answer = call_llm_api(prompt)
     
-    # Prepare result
     sources = [
         {
             'doc_name': chunk['doc_name'],
             'chunk_id': chunk['chunk_id'],
+            'source_type': chunk.get('source_type', 'unknown'),
             'score': score,
             'text_preview': chunk['text'][:200] + "..."
         }
-        for chunk, score in reranked_chunks
+        for chunk, score in reranked
     ]
     
     return {
         'answer': answer,
         'sources': sources,
-        'num_candidates': len(candidates),
-        'num_reranked': len(reranked_chunks),
-        'prompt_tokens': len(prompt.split())
+        'num_candidates': len(candidates)
     }
 
 # ===========================
-# Workspace Management
+# Preset Dataset Loading
 # ===========================
 
-def create_workspace(name: str):
-    """Create new workspace"""
-    workspace_dir = WORKSPACES_DIR / name
-    workspace_dir.mkdir(exist_ok=True)
-    
-    metadata = {
-        "name": name,
-        "created_at": datetime.now().isoformat(),
-        "documents": []
-    }
-    
-    with open(workspace_dir / "metadata.json", 'w') as f:
-        json.dump(metadata, f, indent=2)
-    
-    return metadata
-
-def load_workspace(name: str) -> Optional[Dict]:
-    """Load workspace metadata"""
-    workspace_dir = WORKSPACES_DIR / name
-    metadata_file = workspace_dir / "metadata.json"
-    
-    if metadata_file.exists():
-        with open(metadata_file, 'r') as f:
-            return json.load(f)
-    return None
-
-def list_workspaces() -> List[str]:
-    """List all workspaces"""
-    if not WORKSPACES_DIR.exists():
-        return []
-    return [d.name for d in WORKSPACES_DIR.iterdir() if d.is_dir()]
-
-def add_document_to_workspace(workspace_name: str, uploaded_file, 
-                               vector_db: VectorDatabase, embedding_model: SentenceTransformer) -> bool:
+def load_preset_datasets(vector_db: VectorDatabase, embedding_model: SentenceTransformer, 
+                        ocr_reader: easyocr.Reader):
     """
-    Process and add document to workspace
+    Load and process preset datasets
     
-    Full RAG pipeline:
-    1. Extract text from file
-    2. Chunk text
-    3. Generate embeddings
-    4. Index in vector database
+    Complete pipeline for each file:
+    1. Text extraction with OCR
+    2. Chunking
+    3. Embedding
+    4. Indexing
     """
-    try:
-        # Save file
-        workspace_dir = WORKSPACES_DIR / workspace_name
-        file_path = workspace_dir / uploaded_file.name
+    st.info("🔄 Loading preset datasets...")
+    
+    # Check if already loaded
+    if VECTOR_DB_DIR.exists() and (VECTOR_DB_DIR / "faiss.index").exists():
+        if vector_db.load(VECTOR_DB_DIR):
+            st.success("✅ Loaded existing vector database")
+            return
+    
+    # Process each preset file
+    for filename in PRESET_DATASETS:
+        file_path = UPLOADS_DIR / filename
         
-        with open(file_path, 'wb') as f:
-            f.write(uploaded_file.getvalue())
+        if not file_path.exists():
+            st.warning(f"⚠️ Preset file not found: {filename}. Please place in {UPLOADS_DIR}")
+            continue
+        
+        st.info(f"📄 Processing: {filename}")
+        
+        doc_id = hashlib.md5(filename.encode()).hexdigest()[:8]
         
         # Step 1: Extract text
-        st.info("📄 Step 1/4: Extracting text...")
-        text = extract_text_from_file(file_path)
+        if filename.endswith('.pdf'):
+            # OCR processing for PDF
+            ocr_results = process_pdf_with_ocr(file_path, doc_id, ocr_reader)
+            
+            # Extract printed text
+            printed_text = "\n\n".join([
+                page['full_printed_text'] for page in ocr_results['pages']
+            ])
+            
+            # Extract handwritten text
+            handwritten_text = "\n\n".join([
+                region['text'] 
+                for page in ocr_results['pages'] 
+                for region in page['handwritten_regions']
+            ])
+            
+            # Step 2-4: Chunk, embed, and index printed text
+            if printed_text.strip():
+                printed_chunks = chunk_text(printed_text)
+                if printed_chunks:
+                    printed_texts = [c['text'] for c in printed_chunks]
+                    printed_embeddings = generate_embeddings(printed_texts, embedding_model)
+                    vector_db.add_documents(printed_chunks, printed_embeddings, doc_id, filename, "printed")
+            
+            # Step 2-4: Chunk, embed, and index handwritten text
+            if handwritten_text.strip():
+                hw_chunks = chunk_text(handwritten_text)
+                if hw_chunks:
+                    hw_texts = [c['text'] for c in hw_chunks]
+                    hw_embeddings = generate_embeddings(hw_texts, embedding_model)
+                    vector_db.add_documents(hw_chunks, hw_embeddings, doc_id, filename, "handwritten")
         
-        if not text:
-            st.error("No text extracted from document")
-            return False
-        
-        st.success(f"✓ Extracted {len(text)} characters")
-        
-        # Step 2: Chunk text
-        st.info("✂️ Step 2/4: Chunking text...")
-        chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
-        st.success(f"✓ Created {len(chunks)} chunks")
-        
-        # Step 3: Generate embeddings
-        st.info("🔢 Step 3/4: Generating embeddings...")
-        chunk_texts = [chunk['text'] for chunk in chunks]
-        embeddings = generate_embeddings(chunk_texts, embedding_model)
-        st.success(f"✓ Generated {len(embeddings)} embeddings")
-        
-        # Step 4: Add to vector database
-        st.info("💾 Step 4/4: Indexing in vector database...")
-        doc_id = hashlib.md5(uploaded_file.name.encode()).hexdigest()[:8]
-        vector_db.add_documents(chunks, embeddings, doc_id, uploaded_file.name)
-        vector_db.save(workspace_name)
-        st.success(f"✓ Indexed document: {uploaded_file.name}")
-        
-        # Update workspace metadata
-        metadata = load_workspace(workspace_name)
-        metadata['documents'].append({
-            'filename': uploaded_file.name,
-            'doc_id': doc_id,
-            'size': uploaded_file.size,
-            'num_chunks': len(chunks),
-            'upload_date': datetime.now().isoformat()
-        })
-        
-        with open(workspace_dir / "metadata.json", 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        return True
-        
-    except Exception as e:
-        st.error(f"Error processing document: {e}")
-        import traceback
-        st.code(traceback.format_exc())
-        return False
+        elif filename.endswith('.docx'):
+            # Direct text extraction for DOCX
+            text = extract_text_from_docx(file_path)
+            if text.strip():
+                chunks = chunk_text(text)
+                if chunks:
+                    texts = [c['text'] for c in chunks]
+                    embeddings = generate_embeddings(texts, embedding_model)
+                    vector_db.add_documents(chunks, embeddings, doc_id, filename, "printed")
+    
+    # Save vector database
+    vector_db.save(VECTOR_DB_DIR)
+    st.success("✅ All preset datasets processed and indexed")
 
 # ===========================
 # Streamlit UI
@@ -700,116 +673,107 @@ def add_document_to_workspace(workspace_name: str, uploaded_file,
 
 def render_header():
     st.markdown(f"""
-    <div style='background: linear-gradient(90deg, #1e40af 0%, #7c3aed 100%); 
-                padding: 2rem; border-radius: 15px; margin-bottom: 2rem;'>
+    <div style='background: linear-gradient(90deg, #1e3a8a 0%, #7c3aed 100%); 
+                padding: 2rem; border-radius: 10px; margin-bottom: 2rem;'>
         <h1 style='color: white; margin: 0;'>📋 {APP_TITLE}</h1>
-        <p style='color: #e0e7ff; margin-top: 0.5rem;'>Version {VERSION} | Full RAG Pipeline</p>
+        <p style='color: #e0e7ff; margin-top: 0.5rem;'>Version {VERSION}</p>
     </div>
     """, unsafe_allow_html=True)
 
 def main():
     st.set_page_config(
-        page_title="RAG Underwriting Assistant",
+        page_title="Underwriting RAG",
         page_icon="📋",
         layout="wide"
     )
     
-    ensure_dirs()
+    ensure_directories()
     render_header()
     
     # Initialize session state
-    if 'current_workspace' not in st.session_state:
-        st.session_state.current_workspace = "Default"
-    
     if 'vector_db' not in st.session_state:
         st.session_state.vector_db = VectorDatabase()
     
     if 'reranker' not in st.session_state:
         st.session_state.reranker = BM25Reranker()
     
-    # Load embedding model
+    if 'datasets_loaded' not in st.session_state:
+        st.session_state.datasets_loaded = False
+    
+    # Load models
     embedding_model = load_embedding_model()
+    ocr_reader = load_ocr_reader()
     
     # Sidebar
     with st.sidebar:
-        st.header("🗂️ Workspace")
+        st.header("⚙️ Configuration")
         
-        workspaces = list_workspaces()
-        if not workspaces:
-            create_workspace("Default")
-            workspaces = ["Default"]
-        
-        selected_workspace = st.selectbox(
-            "Select Workspace:",
-            workspaces,
-            index=workspaces.index(st.session_state.current_workspace) if st.session_state.current_workspace in workspaces else 0
-        )
-        
-        if selected_workspace != st.session_state.current_workspace:
-            st.session_state.current_workspace = selected_workspace
-            # Load vector DB for this workspace
-            st.session_state.vector_db = VectorDatabase()
-            st.session_state.vector_db.load(selected_workspace)
-            st.rerun()
-        
-        st.markdown("---")
-        
-        # Create new workspace
-        with st.expander("➕ New Workspace"):
-            new_name = st.text_input("Workspace Name:")
-            if st.button("Create"):
-                if new_name:
-                    create_workspace(new_name)
-                    st.success(f"Created: {new_name}")
-                    st.rerun()
-        
-        st.markdown("---")
-        
-        # Vector DB stats
-        stats = st.session_state.vector_db.get_stats()
-        st.metric("Documents", stats['total_documents'])
-        st.metric("Chunks", stats['total_chunks'])
-        st.metric("Dimension", stats['dimension'])
-        
-        st.markdown("---")
-        
-        # API Config
-        with st.expander("⚙️ API Key"):
+        # API Key
+        with st.expander("🔑 API Key"):
             api_key = st.text_input("DeepSeek API Key:", type="password", value=DEFAULT_API_KEY)
-            if st.button("Save API Key"):
+            if st.button("Save Key"):
                 st.session_state.api_key = api_key
                 st.success("✓ Saved")
+        
+        st.markdown("---")
+        
+        # Load preset datasets
+        if not st.session_state.datasets_loaded:
+            if st.button("📥 Load Preset Datasets", type="primary"):
+                with st.spinner("Processing datasets..."):
+                    load_preset_datasets(st.session_state.vector_db, embedding_model, ocr_reader)
+                st.session_state.datasets_loaded = True
+                st.rerun()
+        else:
+            st.success("✅ Datasets Loaded")
+            if st.button("🔄 Reload"):
+                st.session_state.datasets_loaded = False
+                st.session_state.vector_db = VectorDatabase()
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # Stats
+        stats = st.session_state.vector_db.get_stats()
+        st.metric("Documents", stats['total_documents'])
+        st.metric("Total Chunks", stats['total_chunks'])
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("🖨️ Printed", stats['printed_chunks'])
+        with col2:
+            st.metric("✍️ Handwritten", stats['handwritten_chunks'])
     
     # Main tabs
-    tab1, tab2, tab3 = st.tabs(["💬 Query (RAG)", "⬆️ Upload Documents", "📊 Document Explorer"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "💬 AI Chat (RAG)", 
+        "📄 Document Viewer", 
+        "🗄️ Vector Database", 
+        "✍️ OCR Results"
+    ])
     
-    # TAB 1: RAG Query
+    # TAB 1: AI Chat with RAG
     with tab1:
-        st.header("💬 Query with RAG")
+        st.header("💬 AI Chat with RAG Pipeline")
         
         if stats['total_documents'] == 0:
-            st.warning("⚠️ No documents in database. Please upload documents first.")
+            st.warning("⚠️ Please load preset datasets first")
         else:
-            st.info(f"📚 Ready to query {stats['total_documents']} document(s) with {stats['total_chunks']} chunks")
+            st.markdown("""
+            **RAG Pipeline Steps:**
+            - **Step 5**: Query vectorization
+            - **Step 6**: Semantic search (retrieve top-k)
+            - **Step 7**: BM25 reranking + context assembly
+            - **Step 8**: LLM generation
+            """)
             
             query = st.text_area(
                 "Enter your question:",
-                placeholder="e.g., What are the key terms of the MSC insurance policy?",
+                placeholder="e.g., What are the retention terms in Agnes Fisheries case?",
                 height=100
             )
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                top_k_retrieval = st.slider("Initial Retrieval (Top-K)", 5, 20, TOP_K_RETRIEVAL)
-            with col2:
-                top_k_rerank = st.slider("After Reranking (Top-K)", 1, 10, TOP_K_RERANK)
-            with col3:
-                temperature = st.slider("LLM Temperature", 0.0, 1.0, 0.3)
-            
             if st.button("🔍 Search & Answer", type="primary"):
-                if not query:
-                    st.warning("Please enter a question")
-                else:
+                if query:
                     with st.spinner("Running RAG pipeline..."):
                         result = rag_query(
                             query,
@@ -818,100 +782,177 @@ def main():
                             st.session_state.reranker
                         )
                         
-                        # Display answer
                         st.markdown("### 💡 Answer")
                         st.markdown(result['answer'])
                         
                         st.markdown("---")
-                        
-                        # Display sources
-                        st.markdown("### 📚 Sources")
-                        st.caption(f"Retrieved {result['num_candidates']} candidates → Reranked to {result['num_reranked']}")
+                        st.markdown("### 📚 Retrieved Sources")
                         
                         for idx, source in enumerate(result['sources'], 1):
-                            with st.expander(f"Source {idx}: {source['doc_name']} (Score: {source['score']:.3f})"):
+                            source_icon = "🖨️" if source['source_type'] == 'printed' else "✍️"
+                            with st.expander(
+                                f"{source_icon} Source {idx}: {source['doc_name']} (Score: {source['score']:.3f})"
+                            ):
+                                st.markdown(f"**Type:** {source['source_type'].upper()}")
                                 st.markdown(f"**Chunk ID:** {source['chunk_id']}")
                                 st.markdown(f"**Preview:**\n{source['text_preview']}")
-                        
-                        # Display stats
-                        with st.expander("📊 Pipeline Stats"):
-                            st.json({
-                                'Candidates Retrieved': result['num_candidates'],
-                                'Top-K After Reranking': result['num_reranked'],
-                                'Prompt Tokens (approx)': result['prompt_tokens']
-                            })
     
-    # TAB 2: Upload
+    # TAB 2: Document Viewer
     with tab2:
-        st.header("⬆️ Upload Documents")
+        st.header("📄 Document Viewer (Original Files)")
         
-        st.markdown("""
-        Upload documents to build your knowledge base. Supported formats:
-        - 📄 PDF
-        - 📝 Word (.docx)
-        - 📊 Excel (.xlsx)
-        - 📽️ PowerPoint (.pptx)
-        - 📃 Text (.txt)
-        """)
+        st.markdown("View original documents and their extracted content")
         
-        uploaded_files = st.file_uploader(
-            "Choose files:",
-            type=list(SUPPORTED_FORMATS.keys()),
-            accept_multiple_files=True
-        )
+        ocr_results_files = list(OCR_RESULTS_DIR.glob("*_results.json"))
         
-        if uploaded_files:
-            st.info(f"Selected {len(uploaded_files)} file(s)")
-            
-            if st.button("📤 Process & Index"):
-                progress = st.progress(0)
-                
-                for idx, file in enumerate(uploaded_files):
-                    st.markdown(f"### Processing: {file.name}")
-                    
-                    success = add_document_to_workspace(
-                        st.session_state.current_workspace,
-                        file,
-                        st.session_state.vector_db,
-                        embedding_model
-                    )
-                    
-                    if success:
-                        st.success(f"✅ Completed: {file.name}")
-                    else:
-                        st.error(f"❌ Failed: {file.name}")
-                    
-                    progress.progress((idx + 1) / len(uploaded_files))
-                
-                st.balloons()
-                st.info("🔄 Reloading workspace...")
-                st.rerun()
-    
-    # TAB 3: Explorer
-    with tab3:
-        st.header("📊 Document Explorer")
-        
-        metadata = load_workspace(st.session_state.current_workspace)
-        
-        if not metadata or not metadata.get('documents'):
-            st.info("No documents yet")
+        if not ocr_results_files:
+            st.info("No processed documents yet")
         else:
-            docs = metadata['documents']
-            
-            # Display as table
-            df = pd.DataFrame(docs)
-            st.dataframe(
-                df[['filename', 'num_chunks', 'size', 'upload_date']],
-                use_container_width=True
+            selected_file = st.selectbox(
+                "Select document:",
+                [f.stem.replace("_results", "") for f in ocr_results_files]
             )
             
-            # Document details
-            st.markdown("---")
-            st.subheader("Document Details")
+            if selected_file:
+                results_path = OCR_RESULTS_DIR / f"{selected_file}_results.json"
+                
+                with open(results_path, 'r', encoding='utf-8') as f:
+                    ocr_results = json.load(f)
+                
+                st.subheader(f"📄 {ocr_results['filename']}")
+                
+                for page in ocr_results['pages']:
+                    with st.expander(f"Page {page['page_num']}", expanded=False):
+                        st.markdown("#### 🖨️ Printed Text")
+                        st.text_area(
+                            "Full page printed text:",
+                            value=page['full_printed_text'],
+                            height=200,
+                            key=f"printed_{page['page_num']}"
+                        )
+                        
+                        if page['handwritten_regions']:
+                            st.markdown("#### ✍️ Handwritten Regions")
+                            st.info(f"Found {len(page['handwritten_regions'])} handwritten region(s)")
+                            
+                            for region in page['handwritten_regions']:
+                                col1, col2 = st.columns([1, 2])
+                                
+                                with col1:
+                                    if Path(region['image_path']).exists():
+                                        img = Image.open(region['image_path'])
+                                        st.image(img, caption=f"Region {region['region_id']}", use_column_width=True)
+                                
+                                with col2:
+                                    st.markdown(f"**Region {region['region_id']}**")
+                                    st.markdown(f"**Bounding Box:** {region['bbox']}")
+                                    st.markdown("**OCR Transcription:**")
+                                    st.code(region['text'], language=None)
+    
+    # TAB 3: Vector Database
+    with tab3:
+        st.header("🗄️ Vector Database Explorer")
+        
+        stats = st.session_state.vector_db.get_stats()
+        
+        # Overall stats
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Chunks", stats['total_chunks'])
+        with col2:
+            st.metric("Documents", stats['total_documents'])
+        with col3:
+            st.metric("🖨️ Printed", stats['printed_chunks'])
+        with col4:
+            st.metric("✍️ Handwritten", stats['handwritten_chunks'])
+        
+        st.markdown("---")
+        
+        # Document breakdown
+        st.subheader("Document Breakdown")
+        
+        doc_data = []
+        for doc_id, meta in st.session_state.vector_db.doc_metadata.items():
+            doc_data.append({
+                'Document': meta['doc_name'],
+                'Total Chunks': meta['num_chunks'],
+                '🖨️ Printed': meta['printed_chunks'],
+                '✍️ Handwritten': meta['handwritten_chunks']
+            })
+        
+        if doc_data:
+            df = pd.DataFrame(doc_data)
+            st.dataframe(df, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # Sample chunks
+        st.subheader("Sample Chunks (First 10)")
+        
+        if st.session_state.vector_db.chunks:
+            sample_size = min(10, len(st.session_state.vector_db.chunks))
+            samples = st.session_state.vector_db.chunks[:sample_size]
             
-            for doc in docs:
-                with st.expander(f"📄 {doc['filename']}"):
-                    st.json(doc)
+            for idx, chunk in enumerate(samples, 1):
+                source_icon = "🖨️" if chunk.get('source_type') == 'printed' else "✍️"
+                with st.expander(f"{source_icon} Chunk {idx}: {chunk['doc_name']} (ID: {chunk['chunk_id']})"):
+                    st.json({
+                        'chunk_id': chunk['chunk_id'],
+                        'doc_name': chunk['doc_name'],
+                        'source_type': chunk.get('source_type', 'unknown'),
+                        'text': chunk['text'][:500] + "..."
+                    })
+    
+    # TAB 4: OCR Results
+    with tab4:
+        st.header("✍️ OCR Processing Results")
+        
+        st.markdown("""
+        View detailed OCR processing results:
+        - Handwritten region detection
+        - Text classification (printed vs handwritten)
+        - OCR transcriptions
+        """)
+        
+        ocr_results_files = list(OCR_RESULTS_DIR.glob("*_results.json"))
+        
+        if not ocr_results_files:
+            st.info("No OCR results yet. Load preset datasets to process documents.")
+        else:
+            for results_file in ocr_results_files:
+                with open(results_file, 'r', encoding='utf-8') as f:
+                    results = json.load(f)
+                
+                with st.expander(f"📄 {results['filename']}", expanded=False):
+                    st.markdown(f"**Document ID:** `{results['doc_id']}`")
+                    st.markdown(f"**Total Pages:** {len(results['pages'])}")
+                    
+                    for page in results['pages']:
+                        st.markdown(f"#### Page {page['page_num']}")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Printed Text Length", len(page['full_printed_text']))
+                        with col2:
+                            st.metric("Handwritten Regions", len(page['handwritten_regions']))
+                        
+                        if page['handwritten_regions']:
+                            st.markdown("**Handwritten Regions:**")
+                            
+                            for region in page['handwritten_regions']:
+                                col_a, col_b = st.columns([1, 3])
+                                
+                                with col_a:
+                                    if Path(region['image_path']).exists():
+                                        img = Image.open(region['image_path'])
+                                        st.image(img, width=200)
+                                
+                                with col_b:
+                                    st.markdown(f"**Region {region['region_id']}**")
+                                    st.markdown(f"Bbox: {region['bbox']}")
+                                    st.code(region['text'])
+                        
+                        st.markdown("---")
 
 if __name__ == "__main__":
     main()
