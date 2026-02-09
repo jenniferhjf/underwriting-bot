@@ -33,7 +33,7 @@ AUDIT_DIR = DATA_DIR / "audit_logs"
 CONFIG_DIR = DATA_DIR / "config"
 
 # Initial dataset file
-INITIAL_DATASET = "Hull - MSC_Memo.pdf"
+INITIAL_DATASET = "Hull - MSC_Memo.pdf","Cargo - Agnes Fisheries - CE's notes for Yr 2021-22.pdf","Cargo - Mitsui Co summary with CE's QA 29.8.22.docx"
 
 # Supported file formats
 SUPPORTED_FORMATS = {
