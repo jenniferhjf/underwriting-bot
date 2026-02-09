@@ -15,7 +15,7 @@ import base64
 # Configuration
 # ===========================
 
-VERSION = "2.8.1"
+VERSION = "2.8.2"
 APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
 
 # API Configuration
@@ -122,29 +122,7 @@ Rules:
 - Estimate confidence 0-100% based on clarity
 - Keep each translation concise and clear"""
 
-QA_EXTRACTION_SYSTEM = """Extract Question-Answer pairs from this underwriting document.
-
-Present the Q&A in this format:
-
-## Q&A Summary
-Total question-answer pairs found: [number]
-
----
-
-### Q1: [Question text]
-**Answer:** [Answer text]
-**Source:** [Document section/page]
-**Category:** [Risk/Coverage/Claims/Other]
-
-### Q2: [Question text]
-**Answer:** [Answer text]
-**Source:** [Document section/page]
-**Category:** [Risk/Coverage/Claims/Other]
-
-[Continue for all Q&A pairs]
-
----
-Note: If no structured Q&A found, state "No formal Q&A sections detected in this document"."""
+# Q&A Extraction removed in v2.8.2
 
 AUTO_ANNOTATE_SYSTEM = """Automatically annotate this underwriting document with key metadata.
 
@@ -1296,7 +1274,8 @@ def render_api_config_sidebar():
 
 def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
     """Render a document card with unique keys and delete button"""
-    format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
+    # Safely get format with fallback
+    format_icon = SUPPORTED_FORMATS.get(doc.get('format', 'pdf'), '📄')
     
     # Create unique key prefix using upload date and index
     upload_ts = doc.get('upload_date', '').replace(':', '-').replace('.', '-')
@@ -1314,7 +1293,7 @@ def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
     st.markdown(f"""
     <div class="doc-card">
         <h3>{format_icon} {doc['filename']}</h3>
-        <p><strong>Risk Level:</strong> {doc.get('risk_level', 'N/A')} | 
+        <p><strong>Category:</strong> {doc.get('insurance_type', 'N/A')} | 
            <strong>Decision:</strong> {doc.get('decision', 'Pending')}</p>
         <p>{tags_html} {analysis_badge}</p>
     </div>
@@ -1494,7 +1473,7 @@ def render_analysis_view(workspace_name: str, filename: str):
     
     view_mode = st.radio(
         "Select View:",
-        ["Integrated Report", "Electronic Text", "Handwriting Translation", "Q&A Pairs"],
+        ["Integrated Report", "Electronic Text", "Handwriting Translation"],
         horizontal=True
     )
     
@@ -1502,7 +1481,7 @@ def render_analysis_view(workspace_name: str, filename: str):
         st.markdown("### 📊 Integrated Analysis Report")
         
         # 表格展示部分
-        st.markdown("#### 文档信息表")
+        st.markdown("#### Document Information")
         
         # 提取元数据
         insurance_type = extract_insurance_type(analysis)
@@ -1510,12 +1489,12 @@ def render_analysis_view(workspace_name: str, filename: str):
         underwriting_year = extract_year(analysis)
         timestamp = analysis.get('timestamp', datetime.now().isoformat())[:19]
         
-        # 创建表格数据
+        # Create table data
         table_data = {
-            "案例名称": [filename],
-            "类别": [insurance_type],
-            "承保年度": [underwriting_year],
-            "最新更新时间": [timestamp]
+            "Document Name": [filename],
+            "Category": [insurance_type],
+            "Underwriting Year": [underwriting_year],
+            "Last Updated": [timestamp]
         }
         
         import pandas as pd
@@ -1525,7 +1504,7 @@ def render_analysis_view(workspace_name: str, filename: str):
         st.markdown("---")
         
         # 主要内容
-        st.markdown("#### 主要内容")
+        st.markdown("#### Main Content")
         
         report = analysis.get('integrated_report', '')
         
@@ -1563,7 +1542,7 @@ def render_analysis_view(workspace_name: str, filename: str):
             images = analysis.get('images', [])
             
             if translations:
-                st.markdown("#### 手写内容识别结果")
+                st.markdown("#### Handwriting Recognition Results")
                 
                 for idx, trans in enumerate(translations):
                     col_img, col_text = st.columns([1, 2])
@@ -1595,7 +1574,7 @@ def render_analysis_view(workspace_name: str, filename: str):
                             color_class = "🔴"  # 红色
                         
                         st.progress(confidence / 100)
-                        st.caption(f"{color_class} 识别度: {confidence}%")
+                        st.caption(f"{color_class} Confidence: {confidence}%")
                     
                     st.markdown("---")
             else:
@@ -1660,16 +1639,6 @@ def render_analysis_view(workspace_name: str, filename: str):
                         st.session_state[session_key] = transcription
                         st.success(f"✅ Saved transcription for {img_file.name}")
     
-    elif view_mode == "Q&A Pairs":
-        st.markdown("### ❓ Question & Answer Pairs")
-        
-        qa_text = analysis.get('qa_extraction', '')
-        
-        if not qa_text or len(qa_text) < 50:
-            st.info("No Q&A pairs found in this document")
-        else:
-            st.markdown(qa_text)
-    
     # Add action buttons
     st.markdown("---")
     col1, col2 = st.columns(2)
@@ -1711,11 +1680,6 @@ ELECTRONIC TEXT ANALYSIS
 HANDWRITING TRANSLATION
 {'='*60}
 {analysis.get('handwriting_translation', {}).get('translated_text', 'No handwriting detected')}
-
-{'='*60}
-Q&A PAIRS
-{'='*60}
-{analysis.get('qa_extraction', 'No Q&A pairs found')}
 """
             st.download_button(
                 label="Download TXT Report",
