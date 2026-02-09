@@ -1,11 +1,33 @@
-streamlit>=1.28.0
-PyPDF2>=3.0.0
-pymupdf>=1.23.0  # 关键！PDF 文本提取
-pdfplumber>=0.10.0
-python-docx>=1.0.0
-openpyxl>=3.1.0
-pytesseract>=0.3.10
-Pillow>=10.0.0
-pdf2image>=1.16.3
-requests>=2.31.0
-python-dateutil>=2.8.2
+# Core Framework
+streamlit==1.31.0
+
+# Document Processing
+PyPDF2==3.0.1
+python-docx==1.1.0
+openpyxl==3.1.2
+python-pptx==0.6.23
+pdf2image==1.17.0
+Pillow==10.2.0
+
+# OCR & Handwriting Recognition
+pytesseract==0.3.10
+easyocr==1.7.1
+opencv-python==4.9.0.80
+
+# Image Processing
+scikit-image==0.22.0
+numpy==1.26.3
+
+# RAG Components
+sentence-transformers==2.3.1
+faiss-cpu==1.7.4
+rank-bm25==0.2.2
+
+# LLM API
+requests==2.31.0
+
+# Data Processing
+pandas==2.2.0
+
+# Utilities
+python-dotenv==1.0.1
