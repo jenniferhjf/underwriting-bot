@@ -15,13 +15,13 @@ import base64
 # Configuration
 # ===========================
 
-VERSION = "2.4"
+VERSION = "2.6"
 APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
 
-# Claude API Configuration
-CLAUDE_API_KEY = "sk-yNCM9ClUBDJFsgZ0rktNPkGBTymQWL2rtyag5Rov3buMxRHt"
-CLAUDE_API_BASE = "https://api.anthropic.com/v1"
-CLAUDE_MODEL = "claude-3-5-sonnet-20241022"
+# API Configuration
+DEFAULT_API_KEY = os.getenv("API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
+API_BASE = "https://api.deepseek.com/v1"
+API_MODEL = "deepseek-chat"
 
 # Directory Structure
 DATA_DIR = Path("data")
@@ -30,6 +30,7 @@ EMBEDDINGS_DIR = DATA_DIR / "embeddings"
 ANALYSIS_DIR = DATA_DIR / "analysis"
 REVIEW_DIR = DATA_DIR / "review_queue"
 AUDIT_DIR = DATA_DIR / "audit_logs"
+CONFIG_DIR = DATA_DIR / "config"
 
 # Initial dataset file
 INITIAL_DATASET = "Hull - Marco Polo_Memo.pdf"
@@ -189,13 +190,80 @@ Return ONLY valid JSON:
 }"""
 
 # ===========================
-# Utility Functions
+# Configuration Management
 # ===========================
 
 def ensure_dirs():
     """Create necessary directories"""
-    for dir_path in [WORKSPACES_DIR, EMBEDDINGS_DIR, ANALYSIS_DIR, REVIEW_DIR, AUDIT_DIR]:
+    for dir_path in [WORKSPACES_DIR, EMBEDDINGS_DIR, ANALYSIS_DIR, REVIEW_DIR, AUDIT_DIR, CONFIG_DIR]:
         dir_path.mkdir(parents=True, exist_ok=True)
+
+def load_api_config() -> Dict:
+    """Load API configuration"""
+    config_file = CONFIG_DIR / "api_config.json"
+    
+    if config_file.exists():
+        try:
+            with open(config_file, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    
+    return {"api_key": DEFAULT_API_KEY}
+
+def save_api_config(api_key: str):
+    """Save API configuration"""
+    config_file = CONFIG_DIR / "api_config.json"
+    
+    with open(config_file, 'w') as f:
+        json.dump({"api_key": api_key}, f)
+
+def get_api_key() -> str:
+    """Get API key from config or session state"""
+    if 'api_key' in st.session_state and st.session_state.api_key:
+        return st.session_state.api_key
+    
+    config = load_api_config()
+    return config.get('api_key', DEFAULT_API_KEY)
+
+def validate_api_key(api_key: str) -> Tuple[bool, str]:
+    """Validate API key and test connection"""
+    if not api_key:
+        return False, "API key is empty"
+    
+    # Test connection
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": API_MODEL,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 10
+        }
+        
+        response = requests.post(
+            f"{API_BASE}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            return True, "API key is valid"
+        elif response.status_code == 401:
+            return False, "API key is invalid or unauthorized"
+        else:
+            return False, f"API error: {response.status_code}"
+            
+    except Exception as e:
+        return False, f"Connection error: {str(e)}"
+
+# ===========================
+# Utility Functions
+# ===========================
 
 def log_audit_event(event_type: str, details: Dict[str, Any]):
     """Log audit events for compliance tracking"""
@@ -205,7 +273,7 @@ def log_audit_event(event_type: str, details: Dict[str, Any]):
             "timestamp": timestamp,
             "event_type": event_type,
             "details": details,
-            "user": "system"  # In production, use actual user ID
+            "user": "system"
         }
         
         log_file = AUDIT_DIR / f"audit_{datetime.now().strftime('%Y%m')}.jsonl"
@@ -229,12 +297,9 @@ def preprocess_insurance_text(text: str) -> str:
 
 def generate_embedding(text: str) -> List[float]:
     """Generate embedding vector for text (simplified version using hash)"""
-    # In production, use actual embedding model (e.g., sentence-transformers)
-    # This is a simplified version for demonstration
     hash_obj = hashlib.sha256(preprocess_insurance_text(text).encode())
     hash_int = int.from_bytes(hash_obj.digest(), byteorder='big')
     
-    # Generate 1536-dimensional vector (OpenAI embedding size)
     embedding = []
     for i in range(1536):
         seed = hash_int + i
@@ -255,10 +320,7 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 
 def extract_tag_from_filename(filename: str) -> Optional[str]:
     """Extract primary tag from filename (first word before space/underscore/dash)"""
-    # Remove extension
     name_without_ext = os.path.splitext(filename)[0]
-    
-    # Split by common delimiters
     parts = re.split(r'[\s_\-]+', name_without_ext)
     
     if not parts:
@@ -266,46 +328,59 @@ def extract_tag_from_filename(filename: str) -> Optional[str]:
     
     first_word = parts[0].strip().title()
     
-    # Skip if it's just a number or date-like pattern
     if first_word.isdigit() or re.match(r'\d{4}', first_word):
         return None
     
     return first_word
 
-def call_claude_api(system_prompt: str, user_prompt: str, 
-                    temperature: float = 0.3, max_tokens: int = 4000) -> str:
-    """Call Claude API for text generation"""
+def call_llm_api(system_prompt: str, user_prompt: str, 
+                 temperature: float = 0.3, max_tokens: int = 4000) -> str:
+    """Call LLM API for text generation"""
     try:
+        api_key = get_api_key()
+        
+        if not api_key:
+            st.error("⚠️ API key not configured. Please set it in the sidebar.")
+            return "{}"
+        
         headers = {
-            "x-api-key": CLAUDE_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
         }
         
         payload = {
-            "model": CLAUDE_MODEL,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "system": system_prompt,
+            "model": API_MODEL,
             "messages": [
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
-            ]
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens
         }
         
         response = requests.post(
-            f"{CLAUDE_API_BASE}/messages",
+            f"{API_BASE}/chat/completions",
             headers=headers,
             json=payload,
             timeout=60
         )
         
+        if response.status_code == 401:
+            st.error("⚠️ API Authentication Failed. Please check your API key in the sidebar.")
+            return "{}"
+        
         response.raise_for_status()
         result = response.json()
         
-        return result['content'][0]['text']
+        return result['choices'][0]['message']['content']
         
+    except requests.exceptions.HTTPError as e:
+        st.error(f"API HTTP Error: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            st.error(f"Response: {e.response.text}")
+        return "{}"
     except Exception as e:
-        st.error(f"Claude API Error: {e}")
+        st.error(f"API Error: {e}")
         return "{}"
 
 # ===========================
@@ -384,11 +459,7 @@ def extract_images_from_docx(file_path: Path) -> List[Dict]:
         return []
 
 def classify_handwriting_quality(image_data: str) -> Tuple[str, float]:
-    """Classify handwriting quality (simulated - in production, use vision model)"""
-    # Simulate quality assessment
-    # In production, use Claude Vision or other image analysis
-    
-    # For demo: random classification based on image data hash
+    """Classify handwriting quality (simulated)"""
     hash_val = int(hashlib.md5(image_data[:100].encode()).hexdigest(), 16) % 100
     
     if hash_val > 70:
@@ -429,10 +500,10 @@ def auto_generate_tags(filename: str, text_preview: str) -> List[str]:
         if tag in text_preview:
             tags.append(tag)
     
-    return list(set(tags))[:5]  # Limit to 5 tags
+    return list(set(tags))[:5]
 
 def extract_qa_pairs(text: str, filename: str) -> Dict:
-    """Extract Q&A pairs using Claude"""
+    """Extract Q&A pairs using LLM"""
     try:
         user_prompt = f"""Document: {filename}
 
@@ -441,9 +512,11 @@ Content:
 
 Extract all question-answer pairs from this underwriting document."""
 
-        response = call_claude_api(QA_EXTRACTION_SYSTEM, user_prompt)
+        response = call_llm_api(QA_EXTRACTION_SYSTEM, user_prompt)
         
-        # Parse JSON response
+        if response == "{}":
+            return {"qa_pairs": [], "total_pairs": 0}
+        
         qa_data = json.loads(response)
         return qa_data
         
@@ -463,7 +536,19 @@ Content:
 
 Perform comprehensive analysis of this underwriting document."""
 
-        response = call_claude_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt)
+        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt)
+        
+        if response == "{}":
+            return {
+                "policy_details": {},
+                "premium_info": {},
+                "coverage_terms": {},
+                "exclusions": [],
+                "key_clauses": {},
+                "risk_assessment": {},
+                "underwriter_notes": [],
+                "key_entities": []
+            }
         
         analysis = json.loads(response)
         return analysis
@@ -494,16 +579,12 @@ def translate_handwriting(images: List[Dict], filename: str) -> Dict:
                 "key_insights_from_handwriting": []
             }
         
-        # Simulate handwriting translation
-        # In production, use Claude Vision API with actual images
-        
         translated_annotations = []
         needs_review = []
         
         for img in images:
             tier, confidence = classify_handwriting_quality(img.get('data', ''))
             
-            # Simulate OCR result
             simulated_text = f"Handwritten note from {img['source_file']}"
             
             annotation = {
@@ -512,7 +593,7 @@ def translate_handwriting(images: List[Dict], filename: str) -> Dict:
                 "confidence_tier": tier,
                 "confidence_score": confidence,
                 "original_text_detected": simulated_text,
-                "translated_text": simulated_text.upper(),  # Simulated clean version
+                "translated_text": simulated_text.upper(),
                 "context": "Annotation related to policy terms"
             }
             
@@ -521,7 +602,6 @@ def translate_handwriting(images: List[Dict], filename: str) -> Dict:
             if tier in ["STANDARD", "CURSIVE"]:
                 needs_review.append(img['id'])
         
-        # Generate summary using Claude
         user_prompt = f"""Handwritten annotations detected: {len(images)}
 
 Simulated translations:
@@ -529,7 +609,15 @@ Simulated translations:
 
 Provide a summary of the handwritten content and key insights."""
 
-        response = call_claude_api(HANDWRITING_TRANSLATION_SYSTEM, user_prompt, temperature=0.2)
+        response = call_llm_api(HANDWRITING_TRANSLATION_SYSTEM, user_prompt, temperature=0.2)
+        
+        if response == "{}":
+            return {
+                "translated_annotations": translated_annotations,
+                "handwriting_summary": "Handwritten annotations detected and translated",
+                "needs_human_review": needs_review,
+                "key_insights_from_handwriting": ["Manual review recommended for accuracy"]
+            }
         
         try:
             result = json.loads(response)
@@ -590,14 +678,14 @@ Provide:
 3. Recommendations
 4. Critical Action Items"""
 
-        integration_response = call_claude_api(SYSTEM_INSTRUCTION, integration_prompt)
+        integration_response = call_llm_api(SYSTEM_INSTRUCTION, integration_prompt)
         
         # Combine all results
         full_analysis = {
             "electronic_analysis": electronic_analysis,
             "handwriting_translation": handwriting_translation,
             "qa_extraction": qa_pairs,
-            "integrated_report": integration_response,
+            "integrated_report": integration_response if integration_response != "{}" else "Analysis integration failed - API may be unavailable",
             "analysis_timestamp": datetime.now().isoformat()
         }
         
@@ -609,7 +697,10 @@ Provide:
         return {}
 
 def auto_annotate_by_llm(filename: str, text: str, existing_tags: List[str] = None) -> Dict:
-    """Auto-annotate document using Claude"""
+    """Auto-annotate document using LLM"""
+    # Initialize auto_tags at the beginning
+    auto_tags = []
+    
     try:
         filename_tag = extract_tag_from_filename(filename)
         auto_tags = auto_generate_tags(filename, text[:2000])
@@ -626,7 +717,20 @@ Content preview:
 
 Provide comprehensive auto-annotation for this underwriting document."""
 
-        response = call_claude_api(AUTO_ANNOTATE_SYSTEM, user_prompt, temperature=0.3)
+        response = call_llm_api(AUTO_ANNOTATE_SYSTEM, user_prompt, temperature=0.3)
+        
+        if response == "{}":
+            return {
+                'tags': auto_tags if auto_tags else ['Unclassified'],
+                'insurance_type': 'General',
+                'decision': 'Pending',
+                'premium_estimate': 'TBD',
+                'retention': 'TBD',
+                'risk_level': 'Medium',
+                'case_summary': 'API unavailable - manual review required',
+                'key_insights': ['Requires manual analysis'],
+                'confidence': 0.3
+            }
         
         try:
             annotations = json.loads(response)
@@ -636,7 +740,7 @@ Provide comprehensive auto-annotation for this underwriting document."""
                 annotations['tags'].insert(0, filename_tag)
             
             # Ensure required fields
-            annotations.setdefault('tags', auto_tags)
+            annotations.setdefault('tags', auto_tags if auto_tags else ['Unclassified'])
             annotations.setdefault('insurance_type', 'General')
             annotations.setdefault('decision', 'Pending')
             annotations.setdefault('premium_estimate', 'TBD')
@@ -650,7 +754,7 @@ Provide comprehensive auto-annotation for this underwriting document."""
             
         except json.JSONDecodeError:
             return {
-                'tags': auto_tags,
+                'tags': auto_tags if auto_tags else ['Unclassified'],
                 'insurance_type': 'General',
                 'decision': 'Pending',
                 'premium_estimate': 'TBD',
@@ -663,7 +767,17 @@ Provide comprehensive auto-annotation for this underwriting document."""
             
     except Exception as e:
         st.warning(f"Auto-annotation error: {e}")
-        return {'tags': auto_tags if auto_tags else [], 'confidence': 0.0}
+        return {
+            'tags': auto_tags if auto_tags else ['Unclassified'],
+            'insurance_type': 'General',
+            'decision': 'Pending',
+            'premium_estimate': 'TBD',
+            'retention': 'TBD',
+            'risk_level': 'Medium',
+            'case_summary': 'Auto-annotation error, manual review required',
+            'key_insights': ['Error during analysis'],
+            'confidence': 0.0
+        }
 
 # ===========================
 # Workspace Management
@@ -819,10 +933,9 @@ def load_initial_dataset():
         metadata = load_workspace(default_workspace)
         
         if metadata:
-            # Check if file already exists
             for doc in metadata.get("documents", []):
                 if doc["filename"] == INITIAL_DATASET:
-                    return True  # Already loaded
+                    return True
         
         # Create default workspace if it doesn't exist
         if not metadata:
@@ -832,7 +945,6 @@ def load_initial_dataset():
         with open(INITIAL_DATASET, 'rb') as f:
             file_content = f.read()
         
-        # Create a file-like object
         class UploadedFile:
             def __init__(self, name, content):
                 self.name = name
@@ -844,7 +956,6 @@ def load_initial_dataset():
         
         uploaded_file = UploadedFile(INITIAL_DATASET, file_content)
         
-        # Upload to workspace
         result = upload_document_to_workspace(default_workspace, uploaded_file, auto_analyze=True)
         
         if result:
@@ -896,7 +1007,6 @@ def search_documents(query: str, workspace_name: str, top_k: int = 5) -> List[Di
                         "preview": data.get("text_preview", "")
                     })
         
-        # Sort by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)
         
         return results[:top_k]
@@ -910,17 +1020,14 @@ def search_documents(query: str, workspace_name: str, top_k: int = 5) -> List[Di
 # ===========================
 
 def inject_css():
-    """Inject custom CSS for dark/light theme support"""
+    """Inject custom CSS"""
     
-    # Dark theme CSS
     dark_css = """
     <style>
-    /* Main app styling */
     .stApp {
         background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
     }
     
-    /* Main header */
     .main-header {
         background: linear-gradient(90deg, #1e40af 0%, #7c3aed 100%);
         padding: 2rem;
@@ -942,7 +1049,6 @@ def inject_css():
         margin-top: 0.5rem;
     }
     
-    /* Tags and badges */
     .tag-badge {
         display: inline-block;
         padding: 0.4rem 0.8rem;
@@ -959,7 +1065,6 @@ def inject_css():
         background: linear-gradient(135deg, #10b981, #059669);
     }
     
-    /* Review status badges */
     .review-pending {
         background: linear-gradient(135deg, #f59e0b, #d97706);
     }
@@ -968,7 +1073,6 @@ def inject_css():
         background: linear-gradient(135deg, #10b981, #059669);
     }
     
-    /* Confidence tier badges */
     .confidence-clear {
         background: linear-gradient(135deg, #10b981, #059669);
     }
@@ -981,7 +1085,6 @@ def inject_css():
         background: linear-gradient(135deg, #ef4444, #dc2626);
     }
     
-    /* Document cards */
     .doc-card {
         background: rgba(30, 41, 59, 0.8);
         padding: 1.5rem;
@@ -997,7 +1100,6 @@ def inject_css():
         transform: translateY(-2px);
     }
     
-    /* Review card */
     .review-card {
         background: rgba(30, 41, 59, 0.9);
         padding: 1.5rem;
@@ -1006,7 +1108,6 @@ def inject_css():
         margin-bottom: 1.5rem;
     }
     
-    /* Chat messages */
     .stChatMessage {
         background: rgba(30, 41, 59, 0.6);
         border-radius: 12px;
@@ -1014,7 +1115,6 @@ def inject_css():
         margin-bottom: 1rem;
     }
     
-    /* Buttons */
     .stButton > button {
         border-radius: 8px;
         font-weight: 600;
@@ -1026,48 +1126,81 @@ def inject_css():
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
     }
     
-    /* Metrics */
     .stMetric {
         background: rgba(30, 41, 59, 0.6);
         padding: 1rem;
         border-radius: 10px;
         border: 1px solid rgba(148, 163, 184, 0.2);
     }
-    </style>
-    """
     
-    # Light theme adjustments
-    light_css = """
-    <style>
-    /* Light theme overrides (if needed) */
-    @media (prefers-color-scheme: light) {
-        .tag-badge {
-            border: 1px solid #e5e7eb;
-        }
+    .api-warning {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid #ef4444;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
     }
     </style>
     """
     
     st.markdown(dark_css, unsafe_allow_html=True)
-    st.markdown(light_css, unsafe_allow_html=True)
 
 def render_header():
     """Render application header"""
     st.markdown(f"""
     <div class="main-header">
         <h1>📋 {APP_TITLE}</h1>
-        <p>Version {VERSION} | Powered by Claude AI | Handwriting Translation & Dual-Track Analysis</p>
+        <p>Version {VERSION} | Powered by AI | Handwriting Translation & Dual-Track Analysis</p>
     </div>
     """, unsafe_allow_html=True)
 
+def render_api_config_sidebar():
+    """Render API configuration in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("⚙️ API Configuration")
+        
+        current_key = get_api_key()
+        
+        with st.expander("🔑 Configure AI Model API", expanded=not current_key):
+            api_key_input = st.text_input(
+                "API Key:",
+                value=current_key,
+                type="password",
+                help="Enter your API key for AI model access"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("💾 Save", use_container_width=True):
+                    if api_key_input:
+                        save_api_config(api_key_input)
+                        st.session_state.api_key = api_key_input
+                        st.success("✅ API key saved!")
+                        st.rerun()
+                    else:
+                        st.warning("Please enter an API key")
+            
+            with col2:
+                if st.button("🧪 Test", use_container_width=True):
+                    if api_key_input:
+                        with st.spinner("Testing API key..."):
+                            is_valid, message = validate_api_key(api_key_input)
+                            
+                            if is_valid:
+                                st.success(f"✅ {message}")
+                            else:
+                                st.error(f"❌ {message}")
+                    else:
+                        st.warning("Please enter an API key")
+
 def render_document_card(doc: Dict, workspace_name: str):
-    """Render a document card with metadata"""
+    """Render a document card"""
     format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
     
-    # Render tags
     tags_html = " ".join([f'<span class="tag-badge">{tag}</span>' for tag in doc.get('tags', [])])
     
-    # Analysis badge
     analysis_badge = ""
     if doc.get('has_deep_analysis'):
         analysis_badge = '<span class="tag-badge analysis-badge">✓ Analyzed</span>'
@@ -1104,7 +1237,7 @@ def render_document_card(doc: Dict, workspace_name: str):
                 )
 
 def render_analysis_view(workspace_name: str, filename: str):
-    """Render analysis results"""
+    """Render analysis results with debug info"""
     analysis_file = ANALYSIS_DIR / f"{workspace_name}_{filename}.json"
     
     if not analysis_file.exists():
@@ -1116,7 +1249,12 @@ def render_analysis_view(workspace_name: str, filename: str):
     
     st.subheader("📊 Comprehensive Analysis Results")
     
-    # View toggle
+    # Show API status
+    api_key = get_api_key()
+    if not api_key:
+        st.error("⚠️ API key not configured. Analysis may be incomplete.")
+        st.info("Please configure an API key in the sidebar (⚙️ API Configuration)")
+    
     view_mode = st.radio(
         "Select View:",
         ["Integrated Report", "Electronic Text", "Handwriting Translation", "Q&A Pairs"],
@@ -1125,13 +1263,39 @@ def render_analysis_view(workspace_name: str, filename: str):
     
     if view_mode == "Integrated Report":
         st.markdown("### 📝 Integrated Analysis Report")
-        st.markdown(analysis.get('integrated_report', 'No integrated report available'))
+        
+        report = analysis.get('integrated_report', '')
+        
+        # Check if report is empty or error message
+        if not report or report == "{}" or "API" in report or "failed" in report.lower():
+            st.error("❌ Analysis generation failed or incomplete")
+            st.markdown("""
+            **Possible reasons:**
+            1. API key is not configured
+            2. API connection failed
+            3. API quota exceeded
+            
+            **How to fix:**
+            1. Configure API key in the sidebar (⚙️ API Configuration)
+            2. Click "🧪 Test" to verify the connection
+            3. Click "🔄 Re-run Analysis" below
+            """)
+            
+            # Show raw data for debugging
+            with st.expander("🔍 Debug Information"):
+                st.json(analysis)
+        else:
+            st.markdown(report)
         
     elif view_mode == "Electronic Text":
         st.markdown("### 📄 Electronic Text Analysis")
         electronic = analysis.get('electronic_analysis', {})
         
-        if electronic:
+        if not electronic or len(electronic) == 0:
+            st.warning("⚠️ Electronic text analysis is empty. API may have failed.")
+            with st.expander("🔍 View Raw Data"):
+                st.json(analysis)
+        else:
             with st.expander("Policy Details", expanded=True):
                 st.json(electronic.get('policy_details', {}))
             
@@ -1140,8 +1304,6 @@ def render_analysis_view(workspace_name: str, filename: str):
             
             with st.expander("Coverage Terms"):
                 st.json(electronic.get('coverage_terms', {}))
-        else:
-            st.info("No electronic text analysis available")
     
     elif view_mode == "Handwriting Translation":
         st.markdown("### ✍️ Handwriting Translation Results")
@@ -1150,20 +1312,25 @@ def render_analysis_view(workspace_name: str, filename: str):
         st.markdown(f"**Summary:** {handwriting.get('handwriting_summary', 'N/A')}")
         
         st.markdown("#### Translated Annotations:")
-        for annotation in handwriting.get('translated_annotations', []):
-            tier = annotation['confidence_tier']
-            confidence = annotation['confidence_score']
-            
-            tier_class = f"confidence-{tier.lower()}"
-            
-            st.markdown(f"""
-            <div class="review-card">
-                <p><strong>Location:</strong> {annotation['location']}</p>
-                <p><strong>Confidence:</strong> <span class="tag-badge {tier_class}">{tier} ({confidence:.2f})</span></p>
-                <p><strong>Translated Text:</strong> {annotation['translated_text']}</p>
-                <p><strong>Context:</strong> {annotation.get('context', 'N/A')}</p>
-            </div>
-            """, unsafe_allow_html=True)
+        annotations = handwriting.get('translated_annotations', [])
+        
+        if not annotations:
+            st.info("No handwritten content detected in this document")
+        else:
+            for annotation in annotations:
+                tier = annotation['confidence_tier']
+                confidence = annotation['confidence_score']
+                
+                tier_class = f"confidence-{tier.lower()}"
+                
+                st.markdown(f"""
+                <div class="review-card">
+                    <p><strong>Location:</strong> {annotation['location']}</p>
+                    <p><strong>Confidence:</strong> <span class="tag-badge {tier_class}">{tier} ({confidence:.2f})</span></p>
+                    <p><strong>Translated Text:</strong> {annotation['translated_text']}</p>
+                    <p><strong>Context:</strong> {annotation.get('context', 'N/A')}</p>
+                </div>
+                """, unsafe_allow_html=True)
         
         if handwriting.get('key_insights_from_handwriting'):
             st.markdown("#### Key Insights from Handwriting:")
@@ -1174,18 +1341,55 @@ def render_analysis_view(workspace_name: str, filename: str):
         st.markdown("### ❓ Question & Answer Pairs")
         qa_data = analysis.get('qa_extraction', {})
         
-        for qa in qa_data.get('qa_pairs', []):
-            with st.expander(f"Q: {qa.get('question', 'N/A')}"):
-                st.markdown(f"**Answer:** {qa.get('answer', 'N/A')}")
-                st.markdown(f"**Source:** {qa.get('source', 'N/A')}")
-                st.markdown(f"**Category:** {qa.get('category', 'N/A')}")
+        pairs = qa_data.get('qa_pairs', [])
+        
+        if not pairs:
+            st.info("No Q&A pairs found in this document")
+        else:
+            for qa in pairs:
+                with st.expander(f"Q: {qa.get('question', 'N/A')}"):
+                    st.markdown(f"**Answer:** {qa.get('answer', 'N/A')}")
+                    st.markdown(f"**Source:** {qa.get('source', 'N/A')}")
+                    st.markdown(f"**Category:** {qa.get('category', 'N/A')}")
+    
+    # Add reanalysis button
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔄 Re-run Analysis"):
+            with st.spinner("Re-analyzing document..."):
+                # Load document
+                metadata = load_workspace(workspace_name)
+                doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
+                
+                if doc:
+                    file_path = Path(doc['path'])
+                    text = extract_text_from_file(file_path)
+                    images = []
+                    
+                    if file_path.suffix.lower() in ['.docx', '.doc']:
+                        images = extract_images_from_docx(file_path)
+                    
+                    # Perform analysis
+                    new_analysis = perform_dual_track_analysis(text, images, filename)
+                    
+                    # Save results
+                    with open(analysis_file, 'w') as f:
+                        json.dump(new_analysis, f, indent=2)
+                    
+                    st.success("✅ Analysis complete! Refreshing...")
+                    st.rerun()
+    
+    with col2:
+        if st.button("🔍 View Full JSON"):
+            st.json(analysis)
 
 # ===========================
 # Main Application
 # ===========================
 
 def main():
-    # Page configuration
     st.set_page_config(
         page_title="Enhanced Underwriting Assistant",
         page_icon="📋",
@@ -1193,10 +1397,7 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Inject CSS
     inject_css()
-    
-    # Initialize directories
     ensure_dirs()
     
     # Initialize session state
@@ -1215,20 +1416,21 @@ def main():
     if 'current_review_index' not in st.session_state:
         st.session_state.current_review_index = 0
     
-    # Render header
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = get_api_key()
+    
     render_header()
     
-    # Load initial dataset on first run
+    # Load initial dataset
     if not st.session_state.initial_load_done:
         with st.spinner("Loading initial dataset..."):
             load_initial_dataset()
         st.session_state.initial_load_done = True
     
-    # Sidebar - Workspace Management
+    # Sidebar
     with st.sidebar:
         st.header("🗂️ Workspace Management")
         
-        # List workspaces
         workspaces = list_workspaces()
         
         if not workspaces:
@@ -1246,7 +1448,6 @@ def main():
         
         st.markdown("---")
         
-        # Create new workspace
         with st.expander("➕ Create New Workspace"):
             new_workspace_name = st.text_input("Workspace Name:")
             new_workspace_desc = st.text_area("Description:")
@@ -1262,14 +1463,15 @@ def main():
         
         st.markdown("---")
         
-        # Workspace info
         if st.session_state.current_workspace:
             metadata = load_workspace(st.session_state.current_workspace)
             if metadata:
                 st.info(f"📁 **{metadata['name']}**\n\n{metadata.get('description', 'No description')}")
                 st.metric("Documents", len(metadata.get('documents', [])))
+        
+        render_api_config_sidebar()
     
-    # Main content area - Tabs
+    # Main tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "💬 Chat Assistant",
         "📚 Document Library",
@@ -1283,27 +1485,21 @@ def main():
         st.header("💬 AI Underwriting Assistant")
         st.markdown("Ask questions about your documents, policies, and underwriting decisions.")
         
-        # Chat interface
         if 'messages' not in st.session_state:
             st.session_state.messages = []
         
-        # Display chat messages
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
         
-        # Chat input
         if prompt := st.chat_input("Ask about underwriting, policies, risk assessment..."):
-            # Add user message
             st.session_state.messages.append({"role": "user", "content": prompt})
             
             with st.chat_message("user"):
                 st.markdown(prompt)
             
-            # Generate response
             with st.chat_message("assistant"):
                 with st.spinner("Analyzing..."):
-                    # Search relevant documents
                     search_results = search_documents(
                         prompt,
                         st.session_state.current_workspace,
@@ -1322,11 +1518,13 @@ Relevant Documents:
 
 Provide a comprehensive answer based on the available documents."""
 
-                    response = call_claude_api(SYSTEM_INSTRUCTION, user_prompt)
+                    response = call_llm_api(SYSTEM_INSTRUCTION, user_prompt)
+                    
+                    if response == "{}":
+                        response = "I apologize, but I'm unable to process your request at this time. Please ensure the API key is configured correctly in the sidebar."
                     
                     st.markdown(response)
                     
-                    # Show sources
                     if search_results:
                         with st.expander("📚 Sources"):
                             for r in search_results:
@@ -1346,7 +1544,6 @@ Provide a comprehensive answer based on the available documents."""
             if not metadata or not metadata.get('documents'):
                 st.info("No documents in this workspace. Upload documents to get started.")
             else:
-                # Search and filter
                 col1, col2 = st.columns([3, 1])
                 
                 with col1:
@@ -1355,10 +1552,8 @@ Provide a comprehensive answer based on the available documents."""
                 with col2:
                     filter_type = st.selectbox("Filter by:", ["All", "PDF", "Word", "Excel", "Images"])
                 
-                # Display documents
                 documents = metadata.get('documents', [])
                 
-                # Apply filters
                 if filter_type != "All":
                     filter_map = {
                         "PDF": "pdf",
@@ -1380,7 +1575,6 @@ Provide a comprehensive answer based on the available documents."""
                 for doc in documents:
                     render_document_card(doc, st.session_state.current_workspace)
                 
-                # View document details
                 if st.session_state.viewing_doc:
                     with st.expander("📄 Document Details", expanded=True):
                         doc = st.session_state.viewing_doc
@@ -1390,7 +1584,6 @@ Provide a comprehensive answer based on the available documents."""
                             st.session_state.viewing_doc = None
                             st.rerun()
                 
-                # View analysis
                 if st.session_state.viewing_analysis:
                     workspace, filename = st.session_state.viewing_analysis
                     render_analysis_view(workspace, filename)
@@ -1455,7 +1648,6 @@ Provide a comprehensive answer based on the available documents."""
             else:
                 documents = metadata.get('documents', [])
                 
-                # Statistics
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
@@ -1475,7 +1667,6 @@ Provide a comprehensive answer based on the available documents."""
                 
                 st.markdown("---")
                 
-                # Document list with analysis status
                 st.subheader("Document Analysis Status")
                 
                 for doc in documents:
@@ -1495,7 +1686,6 @@ Provide a comprehensive answer based on the available documents."""
                             else:
                                 if st.button("Run Analysis", key=f"run_{doc['filename']}"):
                                     with st.spinner("Analyzing..."):
-                                        # Load document
                                         file_path = Path(doc['path'])
                                         text = extract_text_from_file(file_path)
                                         images = []
@@ -1503,35 +1693,30 @@ Provide a comprehensive answer based on the available documents."""
                                         if file_path.suffix.lower() in ['.docx', '.doc']:
                                             images = extract_images_from_docx(file_path)
                                         
-                                        # Perform analysis
                                         analysis = perform_dual_track_analysis(text, images, doc['filename'])
                                         
-                                        # Save results
                                         analysis_file = ANALYSIS_DIR / f"{st.session_state.current_workspace}_{doc['filename']}.json"
                                         with open(analysis_file, 'w') as f:
                                             json.dump(analysis, f, indent=2)
                                         
                                         doc['has_deep_analysis'] = True
                                         
-                                        # Update metadata
                                         with open(WORKSPACES_DIR / st.session_state.current_workspace / "metadata.json", 'w') as f:
                                             json.dump(metadata, f, indent=2)
                                         
                                         st.success("Analysis complete!")
                                         st.rerun()
     
-    # TAB 5: Handwriting Review Workbench
+    # TAB 5: Handwriting Review
     with tab5:
         st.header("✍️ Handwriting Review Workbench")
         st.markdown("Human-in-the-loop verification of handwritten content translation")
         
-        # Load review queue
         review_files = list(REVIEW_DIR.glob("*.json"))
         
         if not review_files:
             st.info("✅ No handwritten content requires review at this time")
         else:
-            # Statistics
             col1, col2, col3 = st.columns(3)
             
             pending = sum(1 for f in review_files if json.loads(f.read_text()).get('status') == 'pending')
@@ -1546,7 +1731,6 @@ Provide a comprehensive answer based on the available documents."""
             
             st.markdown("---")
             
-            # Pagination controls
             if st.session_state.current_review_index >= len(review_files):
                 st.session_state.current_review_index = 0
             
@@ -1556,7 +1740,6 @@ Provide a comprehensive answer based on the available documents."""
             
             st.markdown(f"**Review Item {current_idx + 1} of {len(review_files)}**")
             
-            # Display review item
             col1, col2 = st.columns([1, 1])
             
             with col1:
@@ -1565,21 +1748,18 @@ Provide a comprehensive answer based on the available documents."""
                 st.info(f"**Image ID:** {review_data['image_id']}")
                 st.info(f"**Confidence:** {review_data.get('confidence', 0.5):.2f}")
                 
-                # In production, display actual image here
                 st.markdown("*[Original handwriting image would appear here]*")
             
             with col2:
                 st.markdown("### Translation / Transcription")
                 
-                # Load analysis to get translation
                 analysis_file = ANALYSIS_DIR / f"{review_data['workspace']}_{review_data['document']}.json"
                 
+                matching_ann = None
                 if analysis_file.exists():
                     analysis = json.loads(analysis_file.read_text())
                     handwriting = analysis.get('handwriting_translation', {})
                     
-                    # Find matching annotation
-                    matching_ann = None
                     for ann in handwriting.get('translated_annotations', []):
                         if ann['image_id'] == review_data['image_id']:
                             matching_ann = ann
@@ -1593,7 +1773,6 @@ Provide a comprehensive answer based on the available documents."""
                 else:
                     st.warning("Analysis file not found")
             
-            # Review form
             st.markdown("---")
             st.markdown("### Review Actions")
             
@@ -1623,7 +1802,6 @@ Provide a comprehensive answer based on the available documents."""
                     reject_btn = st.form_submit_button("❌ Mark Unreadable", use_container_width=True)
                 
                 if approve_btn or modify_btn or reject_btn:
-                    # Update review status
                     review_data['status'] = 'completed'
                     review_data['reviewed_at'] = datetime.now().isoformat()
                     review_data['final_transcription'] = transcription
@@ -1634,7 +1812,6 @@ Provide a comprehensive answer based on the available documents."""
                     else:
                         review_data['readable'] = True
                     
-                    # Save updated review
                     with open(review_file, 'w') as f:
                         json.dump(review_data, f, indent=2)
                     
@@ -1645,11 +1822,8 @@ Provide a comprehensive answer based on the available documents."""
                     })
                     
                     st.success("✅ Review submitted!")
-                    
-                    # Don't auto-rerun, let user navigate
                     st.info("Click 'Next Item' to continue reviewing")
             
-            # Navigation buttons outside form
             st.markdown("---")
             col1, col2, col3 = st.columns([1, 2, 1])
             
@@ -1666,7 +1840,6 @@ Provide a comprehensive answer based on the available documents."""
                     st.session_state.current_review_index += 1
                     st.rerun()
             
-            # Bulk export
             st.markdown("---")
             if st.button("📥 Export All Reviews"):
                 export_data = []
