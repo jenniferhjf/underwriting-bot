@@ -10,13 +10,12 @@ from typing import List, Dict, Any, Optional, Tuple
 import requests
 from io import BytesIO
 import base64
-import pandas as pd
 
 # ===========================
 # Configuration
 # ===========================
 
-VERSION = "2.9.0"
+VERSION = "2.8.2"
 APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
 
 # API Configuration
@@ -76,7 +75,7 @@ INSURANCE_TERMS = {
 }
 
 # ===========================
-# System Prompts (Modified)
+# System Prompts (Human-Readable Format)
 # ===========================
 
 SYSTEM_INSTRUCTION = """You are an expert underwriting assistant with deep knowledge of insurance policies, 
@@ -89,88 +88,41 @@ risk assessment, and document analysis. Your role is to help underwriters make i
 
 Always provide responses in clear, professional format suitable for business clients."""
 
-# Modified: Concise summary instead of full report
-ELECTRONIC_TEXT_ANALYSIS_SYSTEM = """提供文档电子文本的简洁总结。
+ELECTRONIC_TEXT_ANALYSIS_SYSTEM = """Analyze this insurance document and provide a BRIEF summary ONLY (3-5 sentences maximum).
 
-**要求**：基于文档实际内容，用一个段落（100-200字）总结：
-1. 被保险人名称和承保类型
-2. 关键财务数据（保费、免赔额、限额）
-3. 承保期限和续保条款
-4. 主要风险因素或特殊条件
-5. 历史赔付率或理赔情况（如有）
+**CRITICAL**: Base on ACTUAL document content. Keep it concise and client-friendly.
 
-**格式**：
-- 不要使用标题、项目符号或分段
-- 写成一个连贯的摘要段落
-- 专业、客观、简明
+Cover these key points in 3-5 sentences:
+- Insurance type and policy name
+- Insured party and broker (if mentioned)
+- Key financial terms (premium, coverage, loss ratio)
+- Main risk factors or special notes
 
-示例：
-"本文件承保地中海航运公司（MSC）的船舶Melody和Rhapsody的船体和机器保险，承保期限从2008年5月至2009年5月。每艘船的保险金额为30万美元，免赔额从50万美元提高至100万美元。历史赔付率显示第一期为74.32%，后续续保期降至1.43%，表明风险表现改善。续保保费比到期条款高10%，FCIL按自有优势和费率承保，经纪人佣金为22.5%。"
+Example format:
+"This is a renewal memorandum for MSC vessel Hull & Machinery insurance. The insured is Mediterranean Shipping Company, broker is Cambiaso Risso Asia. Premium of USD 125,000 with net loss ratio of 74.32% and brokerage rate of 22.5%. Deductible increased from USD 500k to USD 1mil with FCIL writing at own merits."
 
-**重要**：仅提取和分析文档中的实际内容，保持总结简洁明了。"""
+DO NOT use sections, headers, or detailed breakdown. Just 3-5 concise sentences."""
 
-# Modified: Structured format without summary sections
-HANDWRITING_TRANSLATION_SYSTEM = """分析并翻译承保文件中的手写批注。
+HANDWRITING_TRANSLATION_SYSTEM = """Translate handwritten annotations from this insurance document.
 
-**输出格式**：对每个检测到的手写批注，使用以下格式：
+**CRITICAL**: For EACH handwritten annotation, provide ONLY:
 
----
-图片ID: [标识符]
-翻译文本: [手写内容的准确转录]
-识别置信度: [百分比，如 85%]
-位置: [文档中的位置]
-类型: [签名/评论/日期/审批/备注]
----
+[Location] Translated text (Confidence: XX%)
 
-**严格要求**：
-- 不要包含任何总结性段落
-- 不要包含"概述"或"摘要"部分  
-- 不要包含"需要人工审核"的列表
-- 不要包含结论性文字
-- 只输出单个批注的翻译，每个批注使用上述格式
+Example output:
+[Top of Page 1] To CEO: Renewal suggestions for your consideration (Confidence: 85%)
+[Right margin, Page 2] Check premium calculation and verify loss ratio (Confidence: 92%)
+[Bottom of Page 3] Approved for renewal with increased deductible (Confidence: 78%)
 
-示例输出：
----
-图片ID: page1_img3
-翻译文本: 致CEO审阅
-识别置信度: 92%
-位置: 第1页，右上角
-类型: 审批
----
+Rules:
+- DO NOT write "Handwriting Summary" or any overview section
+- DO NOT write "Detected Annotations" header
+- DO NOT write "Key Insights" section
+- Only provide direct translations in the format: [Location] Text (Confidence: XX%)
+- Estimate confidence 0-100% based on clarity
+- Keep each translation concise and clear"""
 
----
-图片ID: page2_img5
-翻译文本: 建议续保，保费上浮5%
-识别置信度: 78%
-位置: 第2页，页边空白处
-类型: 评论
----
-
-**仅输出批注翻译**，不要添加任何其他文字。"""
-
-QA_EXTRACTION_SYSTEM = """Extract Question-Answer pairs from this underwriting document.
-
-Present the Q&A in this format:
-
-## Q&A Summary
-Total question-answer pairs found: [number]
-
----
-
-### Q1: [Question text]
-**Answer:** [Answer text]
-**Source:** [Document section/page]
-**Category:** [Risk/Coverage/Claims/Other]
-
-### Q2: [Question text]
-**Answer:** [Answer text]
-**Source:** [Document section/page]
-**Category:** [Risk/Coverage/Claims/Other]
-
-[Continue for all Q&A pairs]
-
----
-Note: If no structured Q&A found, state "No formal Q&A sections detected in this document"."""
+# Q&A Extraction removed in v2.8.2
 
 AUTO_ANNOTATE_SYSTEM = """Automatically annotate this underwriting document with key metadata.
 
@@ -341,51 +293,6 @@ def extract_tag_from_filename(filename: str) -> Optional[str]:
     
     return first_word
 
-# NEW FUNCTION: Extract case metadata for table view
-def extract_case_metadata(text: str, filename: str) -> Dict[str, str]:
-    """从文档文本中提取结构化元数据用于表格视图"""
-    
-    metadata = {
-        "案例名称": filename.replace('.pdf', '').replace('.docx', '').replace('_', ' '),
-        "类别": "未分类",
-        "承保年度": "未知",
-        "客户名称": "未指定",
-        "最新更新时间": datetime.now().strftime("%Y-%m-%d")
-    }
-    
-    # 提取保险类型/类别
-    categories = ["船体", "货运", "责任", "财产", "海洋", "航空", "Hull", "Cargo", "Liability", "Property", "Marine", "Aviation"]
-    text_lower = text.lower()
-    for cat in categories:
-        if cat.lower() in text_lower[:500]:
-            metadata["类别"] = cat
-            break
-    
-    # 提取年份
-    year_pattern = r'20\d{2}'
-    years = re.findall(year_pattern, text[:1000])
-    if years:
-        metadata["承保年度"] = years[0]
-    
-    # 提取客户名称
-    client_patterns = [
-        r'(?i)被保险人[：:\s]+([^\n,，]{3,40})',
-        r'(?i)insured[:\s]+([A-Z][A-Za-z\s&\.]{5,50})(?:[\n,]|Ltd|Inc|Corp|Co\.)',
-        r'(?i)客户[：:\s]+([^\n,，]{3,40})',
-        r'(?i)company[:\s]+([A-Z][A-Za-z\s&\.]{5,50})(?:[\n,]|Ltd|Inc|Corp)'
-    ]
-    
-    for pattern in client_patterns:
-        match = re.search(pattern, text[:1000])
-        if match:
-            client_name = match.group(1).strip()
-            client_name = re.sub(r'\s+(Ltd|Inc|Corp|Co\.|Limited|Corporation|Company).*$', '', client_name, flags=re.IGNORECASE)
-            if len(client_name) > 3:
-                metadata["客户名称"] = client_name
-                break
-    
-    return metadata
-
 def call_llm_api(system_prompt: str, user_prompt: str, 
                  temperature: float = 0.3, max_tokens: int = 4000) -> str:
     """Call LLM API for text generation"""
@@ -527,45 +434,63 @@ def detect_handwriting_in_images(images: List[Dict]) -> bool:
     
     return False
 
-def extract_text_from_scanned_pdf(file_path: Path) -> str:
-    """Extract information from scanned PDF"""
+def extract_text_from_scanned_pdf(file_path: Path, images: List[Dict]) -> str:
+    """使用 AI 识别扫描 PDF 中的文字"""
     try:
         import fitz
         
         doc = fitz.open(file_path)
         
-        extracted_info = f"""📷 SCANNED DOCUMENT DETECTED
+        st.info("📷 Scanned PDF detected. Using AI OCR to extract text...")
+        
+        extracted_text = f"""📷 SCANNED DOCUMENT - OCR ANALYSIS
 {'='*50}
 
-This document appears to be a scanned/image-based PDF.
+Document: {file_path.name}
+Total Pages: {len(doc)}
+Total Images: {len(images)}
 
-Document Information:
-- Filename: {file_path.name}
-- Total Pages: {len(doc)}
-- Format: PDF {doc.metadata.get('format', 'Unknown')}
-- Creator: {doc.metadata.get('creator', 'Unknown')}
+{'='*50}
+EXTRACTED TEXT:
+{'='*50}
 
-Image Content Analysis:
 """
         
-        for i, page in enumerate(doc):
-            images = page.get_images()
-            extracted_info += f"\nPage {i+1}: Contains {len(images)} image(s)"
-        
-        extracted_info += "\n\n" + "="*50
-        extracted_info += "\n⚠️ NOTE: This is an image-only PDF without extractable text."
-        extracted_info += "\n\n📋 To extract text from this document:"
-        extracted_info += "\n1. The system will analyze images for handwritten annotations"
-        extracted_info += "\n2. Use the 'Handwriting Translation' tab to view results"
-        extracted_info += "\n3. You can also upload individual page images for OCR processing"
-        extracted_info += "\n\nFor production use, integrate with:"
-        extracted_info += "\n- Google Cloud Vision API"
-        extracted_info += "\n- AWS Textract"
-        extracted_info += "\n- Azure Computer Vision"
+        # 对每张图片进行 OCR
+        for idx, img in enumerate(images[:5]):  # 限制前5张图片
+            with st.spinner(f"Processing page {img.get('page', idx+1)}..."):
+                ocr_prompt = f"""Extract ALL text from this scanned insurance document image.
+
+Include:
+- All printed text (company names, policy details, terms, conditions)
+- Tables and structured data
+- Dates, numbers, percentages
+- Any handwritten annotations
+
+Provide clean, structured text maintaining the original layout where possible.
+Do NOT add explanations, just transcribe the content."""
+                
+                try:
+                    # 调用 AI OCR
+                    ocr_result = call_llm_api(
+                        "You are an expert OCR system for insurance documents.",
+                        f"Extract text from this scanned page:\n\n[Image data of page {img.get('page', idx+1)}]\n\n{ocr_prompt}",
+                        max_tokens=2000
+                    )
+                    
+                    if ocr_result and len(ocr_result) > 20:
+                        extracted_text += f"\n--- Page {img.get('page', idx+1)} ---\n{ocr_result}\n\n"
+                    else:
+                        extracted_text += f"\n--- Page {img.get('page', idx+1)} ---\n[Unable to extract text]\n\n"
+                except Exception as e:
+                    extracted_text += f"\n--- Page {img.get('page', idx+1)} ---\n[OCR Error: {str(e)}]\n\n"
         
         doc.close()
         
-        return extracted_info
+        if len(images) > 5:
+            extracted_text += f"\n\n⚠️ Note: Only first 5 pages were processed. Total {len(images)} images found.\n"
+        
+        return extracted_text
         
     except Exception as e:
         return f"Error processing scanned PDF: {e}"
@@ -608,10 +533,10 @@ def extract_text_from_pdf(file_path: Path) -> Tuple[str, List[Dict]]:
         
         doc.close()
         
-        # If no text but has images, it's a scanned document
+        # If no text but has images, it's a scanned document - use OCR
         if not text_content and all_images:
-            scanned_info = extract_text_from_scanned_pdf(file_path)
-            return (scanned_info, all_images)
+            scanned_text = extract_text_from_scanned_pdf(file_path, all_images)
+            return (scanned_text, all_images)
         
         final_text = "\n\n".join(text_content) if text_content else ""
         return (final_text, all_images)
@@ -721,7 +646,7 @@ def classify_handwriting_quality(image_data: str) -> Tuple[str, float]:
         return "CURSIVE", 0.30
 
 # ===========================
-# Core Analysis Functions (Modified)
+# Core Analysis Functions
 # ===========================
 
 def auto_generate_tags(filename: str, text_preview: str) -> List[str]:
@@ -769,80 +694,96 @@ Extract all question-answer pairs from this underwriting document."""
         st.warning(f"Q&A extraction error: {e}")
         return "Error extracting Q&A pairs."
 
-# MODIFIED: Returns concise summary
 def analyze_electronic_text(text: str, filename: str) -> str:
-    """分析电子/印刷文本 - 返回简洁总结"""
+    """Analyze electronic/printed text - returns formatted text"""
     try:
-        user_prompt = f"""文档名称: {filename}
+        user_prompt = f"""Document: {filename}
 
-完整内容:
+Full Content:
 {text[:6000]}
 
-请对此承保文件进行简洁分析，提供100-200字的段落总结。"""
+Perform comprehensive analysis of this underwriting document. 
+Base your analysis ONLY on the actual content provided above."""
 
-        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt, max_tokens=1000)
+        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt, max_tokens=5000)
         
         if not response:
-            return "无法分析电子文本。请检查API配置。"
+            return "Unable to analyze electronic text. Please check API configuration."
         
         return response
         
     except Exception as e:
-        st.warning(f"电子文本分析错误: {e}")
-        return "电子文本分析过程中发生错误。"
+        st.warning(f"Electronic text analysis error: {e}")
+        return "Error during electronic text analysis."
 
-# MODIFIED: New structured output format
 def translate_handwriting(images: List[Dict], filename: str, text_content: str = "") -> Dict:
-    """翻译手写批注，使用新的输出格式"""
+    """Translate handwritten annotations with intelligent detection"""
     try:
         if not images:
             return {
                 "has_handwriting": False,
-                "translated_text": "此文档中未检测到图片。",
+                "translated_text": "No images detected in this document.",
                 "image_count": 0
             }
         
+        # Detect handwriting using heuristics
         has_handwriting = detect_handwriting_in_images(images)
         
         if not has_handwriting:
             return {
                 "has_handwriting": False,
-                "translated_text": f"文档包含 {len(images)} 张图片，但未检测到手写批注。",
+                "translated_text": f"Document contains {len(images)} image(s), but no handwriting annotations detected.",
                 "image_count": len(images)
             }
         
+        # Prepare analysis prompt with document context
         max_page = max([img.get('page', 1) for img in images])
         
-        user_prompt = f"""文档名称: {filename}
+        user_prompt = f"""Document: {filename}
 
-这是一份包含 {len(images)} 张图片的扫描承保文件，共 {max_page} 页。
+This is a scanned insurance document with {len(images)} images across {max_page} page(s).
 
-文档上下文:
-{text_content[:1500] if text_content else "扫描文档 - 正在分析图片内容"}
+Document Context:
+{text_content[:1500] if text_content else "Scanned document - analyzing image-based content"}
 
-图片分析:
-- 总图片数: {len(images)}
-- 第1页图片数: {len([i for i in images if i.get('page')==1])}
-- 小型覆盖图: {len([i for i in images if i.get('size', 0) < 50000])} 张
+Image Analysis:
+- Total images: {len(images)}
+- Distribution: Page 1 has {len([i for i in images if i.get('page')==1])} image(s)
+- Small overlays detected: {len([i for i in images if i.get('size', 0) < 50000])} (likely handwriting/stamps)
 
-任务: 识别并翻译所有手写批注，按指定格式输出。"""
+Task: Analyze the document structure to identify and translate any handwritten annotations.
+
+For scanned underwriting documents, handwritten notes typically include:
+- Executive comments (e.g., "To CEO", "For review")
+- Renewal recommendations or suggestions
+- Approval signatures or initials
+- Date stamps or reference numbers
+- Risk assessments or underwriter notes
+- Special instructions or attention markers
+
+Provide translation in the specified format with:
+1. Summary of detected handwritten content
+2. Each annotation with its location, type, and translated text
+3. Key insights about what the handwriting indicates
+4. Any items needing manual review"""
 
         response = call_llm_api(HANDWRITING_TRANSLATION_SYSTEM, user_prompt, temperature=0.2, max_tokens=3000)
         
         if not response:
-            response = f"检测到 {len(images)} 张图片，包含手写批注。正在处理中。"
+            response = f"✅ **Have handwriting notes**\n\n{len(images)} image(s) detected in document. Handwriting analysis in progress.\n\nNote: For accurate OCR, integrate with Google Cloud Vision API or AWS Textract."
         
         return {
             "has_handwriting": True,
             "translated_text": response,
-            "image_count": len(images)
+            "image_count": len(images),
+            "needs_review": []
         }
         
     except Exception as e:
-        st.warning(f"手写翻译错误: {e}")
+        st.warning(f"Handwriting translation error: {e}")
         return {
             "has_handwriting": False,
-            "translated_text": f"手写翻译过程中发生错误: {e}",
+            "translated_text": f"Error during handwriting translation: {e}",
             "image_count": 0
         }
 
@@ -854,9 +795,6 @@ def perform_dual_track_analysis(text: str, images: List[Dict], filename: str) ->
         
         # Track 2: Handwriting translation (with text context)
         handwriting_translation = translate_handwriting(images, filename, text)
-        
-        # Extract Q&A pairs
-        qa_pairs = extract_qa_pairs(text, filename)
         
         # Combined analysis
         has_handwriting = handwriting_translation.get('has_handwriting', False)
@@ -870,16 +808,14 @@ ELECTRONIC TEXT ANALYSIS:
 HANDWRITING NOTES:
 {handwriting_text[:1200] if has_handwriting else "No handwritten notes detected"}
 
-Q&A SUMMARY:
-{qa_pairs[:1000]}
-
 Provide:
 1. Executive Summary (2-3 paragraphs covering key points)
-2. Critical Risk Factors (identify top 3-5 risks)
+2. Critical Risk Factors (identify top 3-5 risks, DO NOT include risk level/rating)
 3. Underwriting Recommendations (specific actions needed)
 4. Key Decision Points (items requiring management attention)
 
-Base the report on ACTUAL content from this specific document."""
+Base the report on ACTUAL content from this specific document.
+DO NOT include risk level, risk rating, or risk assessment scores."""
 
         integration_response = call_llm_api(SYSTEM_INSTRUCTION, integration_prompt, max_tokens=4000)
         
@@ -889,9 +825,9 @@ Base the report on ACTUAL content from this specific document."""
         full_analysis = {
             "electronic_analysis": electronic_analysis,
             "handwriting_translation": handwriting_translation,
-            "qa_extraction": qa_pairs,
             "integrated_report": integration_response,
             "has_handwriting": has_handwriting,
+            "images": images,  # Save images for display
             "analysis_timestamp": datetime.now().isoformat()
         }
         
@@ -1093,7 +1029,7 @@ def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyz
                 
                 analysis_file = ANALYSIS_DIR / f"{workspace_name}_{uploaded_file.name}.json"
                 with open(analysis_file, 'w') as f:
-                    json.dump(analysis_result, f, indent=2, ensure_ascii=False)
+                    json.dump(analysis_result, f, indent=2)
                 
                 doc_metadata["has_deep_analysis"] = True
         
@@ -1351,7 +1287,8 @@ def render_api_config_sidebar():
 
 def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
     """Render a document card with unique keys and delete button"""
-    format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
+    # Safely get format with fallback
+    format_icon = SUPPORTED_FORMATS.get(doc.get('format', 'pdf'), '📄')
     
     # Create unique key prefix using upload date and index
     upload_ts = doc.get('upload_date', '').replace(':', '-').replace('.', '-')
@@ -1369,7 +1306,7 @@ def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
     st.markdown(f"""
     <div class="doc-card">
         <h3>{format_icon} {doc['filename']}</h3>
-        <p><strong>Risk Level:</strong> {doc.get('risk_level', 'N/A')} | 
+        <p><strong>Category:</strong> {doc.get('insurance_type', 'N/A')} | 
            <strong>Decision:</strong> {doc.get('decision', 'Pending')}</p>
         <p>{tags_html} {analysis_badge}</p>
     </div>
@@ -1420,390 +1357,392 @@ def render_document_card(doc: Dict, workspace_name: str, doc_index: int = 0):
                 st.session_state[f"confirm_delete_{key_prefix}"] = False
                 st.rerun()
 
-# NEW FUNCTION: Render cases table view with filters
-def render_cases_table_view(workspace_name: str):
-    """渲染所有案例的表格视图，支持筛选"""
+def parse_handwriting_translations(text: str) -> List[Dict]:
+    """解析手写翻译结果，提取位置、文本和置信度"""
+    translations = []
+    if not text:
+        return translations
     
-    metadata = load_workspace(workspace_name)
-    if not metadata or not metadata.get('documents'):
-        st.info("当前工作空间没有文档")
-        return
+    lines = text.split('\n')
     
-    documents = metadata.get('documents', [])
-    
-    # 构建表格数据
-    table_data = []
-    for doc in documents:
-        analysis_file = ANALYSIS_DIR / f"{workspace_name}_{doc['filename']}.json"
-        
-        case_meta = {
-            "案例名称": doc['filename'],
-            "类别": doc.get('insurance_type', '未分类'),
-            "承保年度": "未知",
-            "客户名称": "未指定",
-            "最新更新时间": doc.get('upload_date', '')[:10] if doc.get('upload_date') else ''
-        }
-        
-        # 如果有分析结果，提取元数据
-        if analysis_file.exists():
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('**'):
+            continue
+            
+        # 查找格式: [Location] Text (Confidence: XX%)
+        if '[' in line and ']' in line:
             try:
-                with open(analysis_file, 'r', encoding='utf-8') as f:
-                    analysis = json.load(f)
-                    electronic_text = analysis.get('electronic_analysis', '')
-                    extracted = extract_case_metadata(electronic_text, doc['filename'])
-                    case_meta["类别"] = extracted.get('类别', case_meta["类别"])
-                    case_meta["承保年度"] = extracted.get('承保年度', '未知')
-                    case_meta["客户名称"] = extracted.get('客户名称', '未指定')
-            except:
-                pass
-        
-        # 从标签获取类别
-        if case_meta["类别"] == "未分类" and doc.get('tags'):
-            for tag in doc['tags']:
-                if tag in ["Hull", "Cargo", "Liability", "Property", "Marine", "Aviation"]:
-                    case_meta["类别"] = tag
-                    break
-        
-        table_data.append(case_meta)
+                # 提取位置
+                location_start = line.find('[')
+                location_end = line.find(']')
+                location = line[location_start+1:location_end]
+                
+                # 提取剩余部分
+                rest = line[location_end+1:].strip()
+                
+                # 提取置信度
+                confidence = 70  # 默认值
+                if '(Confidence:' in rest or '(confidence:' in rest:
+                    conf_start = rest.lower().find('(confidence:')
+                    conf_section = rest[conf_start:]
+                    # 查找百分号之前的数字
+                    import re
+                    conf_match = re.search(r'(\d+)%', conf_section)
+                    if conf_match:
+                        confidence = int(conf_match.group(1))
+                    
+                    # 提取文本（去掉置信度部分）
+                    text_content = rest[:conf_start].strip()
+                else:
+                    text_content = rest
+                
+                if text_content:  # 只添加有文本内容的
+                    translations.append({
+                        'location': location,
+                        'text': text_content,
+                        'confidence': confidence
+                    })
+            except Exception as e:
+                continue  # 跳过格式不正确的行
     
-    df = pd.DataFrame(table_data)
-    
-    # 筛选器
-    st.markdown("### 📊 案例概览表")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        categories = ["全部"] + sorted(list(df['类别'].unique()))
-        selected_category = st.selectbox("保险类型:", categories, key="filter_category")
-    
-    with col2:
-        clients = ["全部"] + sorted(list(df['客户名称'].unique()))
-        selected_client = st.selectbox("客户名称:", clients, key="filter_client")
-    
-    with col3:
-        years = ["全部"] + sorted([y for y in df['承保年度'].unique() if y != "未知"], reverse=True)
-        selected_year = st.selectbox("承保年度:", years, key="filter_year")
-    
-    # 应用筛选
-    filtered_df = df.copy()
-    
-    if selected_category != "全部":
-        filtered_df = filtered_df[filtered_df['类别'] == selected_category]
-    
-    if selected_client != "全部":
-        filtered_df = filtered_df[filtered_df['客户名称'] == selected_client]
-    
-    if selected_year != "全部":
-        filtered_df = filtered_df[filtered_df['承保年度'] == selected_year]
-    
-    st.markdown(f"**显示 {len(filtered_df)} / {len(df)} 个案例**")
-    
-    # 显示表格
-    st.dataframe(
-        filtered_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "案例名称": st.column_config.TextColumn("案例名称", width="large"),
-            "类别": st.column_config.TextColumn("类别", width="small"),
-            "客户名称": st.column_config.TextColumn("客户名称", width="medium"),
-            "承保年度": st.column_config.TextColumn("承保年度", width="small"),
-            "最新更新时间": st.column_config.DateColumn("最新更新", format="YYYY-MM-DD", width="small")
-        }
-    )
-    
-    # 选择案例查看详情
-    if len(filtered_df) > 0:
-        st.markdown("---")
-        selected_case = st.selectbox(
-            "选择案例查看详细分析:",
-            filtered_df['案例名称'].tolist(),
-            key="select_case_for_analysis"
-        )
-        
-        if selected_case and st.button("📄 查看详细分析", key="view_selected_analysis"):
-            st.session_state.viewing_analysis = (workspace_name, selected_case)
-            st.rerun()
+    return translations
 
-# COMPLETELY REPLACED: render_analysis_view function
+def extract_insurance_type(analysis: Dict) -> str:
+    """从分析结果中提取保险类型"""
+    text = json.dumps(analysis).lower()
+    
+    if 'hull' in text and 'machinery' in text:
+        return "Hull & Machinery"
+    elif 'hull' in text:
+        return "Hull"
+    elif 'cargo' in text:
+        return "Cargo"
+    elif 'p&i' in text or 'protection' in text and 'indemnity' in text:
+        return "P&I"
+    elif 'war' in text and 'risk' in text:
+        return "War Risk"
+    elif 'liability' in text:
+        return "Liability"
+    else:
+        return "其他"
+
+def extract_client_name(analysis: Dict) -> str:
+    """从分析结果中提取客户名称"""
+    text = json.dumps(analysis)
+    
+    # 查找常见模式
+    patterns = [
+        r'[Ii]nsured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
+,
+        r'[Cc]lient[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
+,
+        r'[Aa]ssured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
+,
+        r'MSC',
+        r'Mediterranean Shipping Company'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            if isinstance(match.group(0), str):
+                return match.group(0)[:50].strip()
+    
+    return "Unknown"
+
+def extract_year(analysis: Dict) -> str:
+    """从分析结果中提取承保年度"""
+    text = json.dumps(analysis)
+    
+    # 查找 2020-2030 之间的年份
+    years = re.findall(r'20[2-3][0-9]', text)
+    
+    if years:
+        # 返回最常见的年份
+        from collections import Counter
+        most_common = Counter(years).most_common(1)
+        return most_common[0][0]
+    
+    return datetime.now().strftime("%Y")
+
 def render_analysis_view(workspace_name: str, filename: str):
-    """渲染分析结果，使用新的表格和显示逻辑"""
+    """Render analysis results in client-ready format"""
     analysis_file = ANALYSIS_DIR / f"{workspace_name}_{filename}.json"
     
     if not analysis_file.exists():
-        st.warning("未找到此文档的分析结果")
+        st.warning("No analysis found for this document")
         return
     
-    with open(analysis_file, 'r', encoding='utf-8') as f:
+    with open(analysis_file, 'r') as f:
         analysis = json.load(f)
     
-    st.subheader(f"📊 分析结果: {filename}")
+    st.subheader("📊 Comprehensive Analysis Results")
     
+    # Show API status warning if needed
     api_key = get_api_key()
     if not api_key:
-        st.error("⚠️ 未配置API密钥，分析结果可能不完整")
+        st.error("⚠️ API key not configured. Analysis may be incomplete.")
     
     view_mode = st.radio(
-        "选择查看模式:",
-        ["📋 案例总览表", "📄 电子文本摘要", "✍️ 手写翻译", "❓ 问答对"],
-        horizontal=True,
-        key="analysis_view_mode"
+        "Select View:",
+        ["Integrated Report", "Electronic Text", "Handwriting Translation"],
+        horizontal=True
     )
     
-    # 案例总览表
-    if view_mode == "📋 案例总览表":
-        render_cases_table_view(workspace_name)
-    
-    # 电子文本摘要
-    elif view_mode == "📄 电子文本摘要":
-        st.markdown("### 📄 文档内容摘要")
+    if view_mode == "Integrated Report":
+        st.markdown("### 📊 Integrated Analysis Report")
+        
+        # 表格展示部分
+        st.markdown("#### Document Information")
+        
+        # 提取元数据
+        insurance_type = extract_insurance_type(analysis)
+        client_name = extract_client_name(analysis)
+        underwriting_year = extract_year(analysis)
+        timestamp = analysis.get('timestamp', datetime.now().isoformat())[:19]
+        
+        # Create table data
+        table_data = {
+            "Document Name": [filename],
+            "Category": [insurance_type],
+            "Underwriting Year": [underwriting_year],
+            "Last Updated": [timestamp]
+        }
+        
+        import pandas as pd
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        
+        # 主要内容
+        st.markdown("#### Main Content")
+        
+        report = analysis.get('integrated_report', '')
+        
+        if not report or "unable" in report.lower():
+            st.error("❌ Analysis generation failed")
+            st.info("💡 Configure API key in sidebar and click 'Re-run Analysis'")
+        else:
+            st.markdown(report)
+        
+    elif view_mode == "Electronic Text":
+        st.markdown("### 📄 Electronic Text Analysis")
         
         electronic = analysis.get('electronic_analysis', '')
         
         if not electronic or len(electronic) < 50:
-            st.warning("⚠️ 电子文本分析为空或不完整")
-            st.info("这可能是扫描文档，请查看"手写翻译"标签页")
+            st.warning("⚠️ Electronic text analysis is empty or incomplete")
+            st.info("This may be a scanned document. Check the Handwriting Translation tab.")
         else:
             st.markdown(electronic)
-            
-            st.markdown("---")
-            if st.button("📥 导出摘要", key="export_summary"):
-                st.download_button(
-                    label="下载文本摘要",
-                    data=electronic,
-                    file_name=f"{filename}_摘要_{datetime.now().strftime('%Y%m%d')}.txt",
-                    mime="text/plain",
-                    key="download_summary_txt"
-                )
     
-    # 手写翻译
-    elif view_mode == "✍️ 手写翻译":
-        st.markdown("### ✍️ 手写批注翻译")
+    elif view_mode == "Handwriting Translation":
+        st.markdown("### ✍️ Handwriting Translation")
         
         handwriting = analysis.get('handwriting_translation', {})
         has_handwriting = handwriting.get('has_handwriting', False)
         
-        if not has_handwriting:
-            st.info("ℹ️ 此文档中未检测到手写内容")
-        else:
-            translation_text = handwriting.get('translated_text', '')
+        if has_handwriting:
+            st.success("✅ **Have handwriting notes**")
             
-            # 解析结构化输出
-            annotations = []
-            current_annotation = {}
+            # 解析翻译结果
+            translated_text = handwriting.get('translated_text', '')
+            translations = parse_handwriting_translations(translated_text)
             
-            for line in translation_text.split('\n'):
-                line = line.strip()
+            # 加载图片数据
+            images = analysis.get('images', [])
+            
+            if translations:
+                st.markdown("#### Handwriting Recognition Results")
                 
-                if line == '---':
-                    if current_annotation and 'text' in current_annotation:
-                        annotations.append(current_annotation)
-                        current_annotation = {}
-                elif line.startswith('图片ID:') or line.startswith('IMAGE:'):
-                    current_annotation['image_id'] = line.split(':', 1)[1].strip()
-                elif line.startswith('翻译文本:') or line.startswith('TEXT:'):
-                    current_annotation['text'] = line.split(':', 1)[1].strip()
-                elif line.startswith('识别置信度:') or line.startswith('CONFIDENCE:'):
-                    conf_str = line.split(':', 1)[1].replace('%', '').strip()
-                    try:
-                        current_annotation['confidence'] = int(conf_str)
-                    except:
-                        current_annotation['confidence'] = 75
-                elif line.startswith('位置:') or line.startswith('LOCATION:'):
-                    current_annotation['location'] = line.split(':', 1)[1].strip()
-                elif line.startswith('类型:') or line.startswith('TYPE:'):
-                    current_annotation['type'] = line.split(':', 1)[1].strip()
-            
-            if current_annotation and 'text' in current_annotation:
-                annotations.append(current_annotation)
-            
-            # 显示批注
-            if annotations:
-                st.success(f"✅ 检测到 {len(annotations)} 个手写批注")
-                
-                for idx, annot in enumerate(annotations, 1):
-                    st.markdown(f"#### 批注 {idx}")
+                for idx, trans in enumerate(translations):
+                    col_img, col_text = st.columns([1, 2])
                     
-                    col1, col2 = st.columns([1, 2])
-                    
-                    with col1:
-                        st.markdown("**📷 手写图片**")
-                        image_id = annot.get('image_id', '')
-                        image_path = ANALYSIS_DIR / f"{workspace_name}_{filename}_{image_id}.png"
-                        
-                        if image_path.exists():
-                            st.image(str(image_path), use_container_width=True)
+                    with col_img:
+                        # 显示对应图片（如果有）
+                        if idx < len(images) and images[idx].get('data'):
+                            try:
+                                img_data = images[idx]['data']
+                                st.image(f"data:image/png;base64,{img_data}", width=200)
+                            except:
+                                st.write(f"🖼️ {trans['location']}")
                         else:
-                            st.info(f"图片ID: {image_id}")
-                            st.caption("💡 在生产环境中，此处将显示实际的手写图片")
-                        
-                        st.caption(f"📍 位置: {annot.get('location', '未指定')}")
+                            st.write(f"🖼️ {trans['location']}")
                     
-                    with col2:
-                        st.markdown("**✍️ 翻译文本**")
-                        st.markdown(f"> _{annot.get('text', '无翻译内容')}_")
+                    with col_text:
+                        # 显示翻译文本
+                        st.markdown(f"**{trans['text']}**")
                         
-                        st.markdown("**📊 识别置信度**")
-                        confidence = annot.get('confidence', 75)
+                        # 显示识别度（进度条 + 百分比）
+                        confidence = trans.get('confidence', 0)
                         
+                        # 根据置信度选择颜色
                         if confidence >= 80:
-                            color = "green"
+                            color_class = "🟢"  # 绿色
                         elif confidence >= 60:
-                            color = "orange"
+                            color_class = "🟡"  # 黄色
                         else:
-                            color = "red"
+                            color_class = "🔴"  # 红色
                         
                         st.progress(confidence / 100)
-                        st.markdown(f"<span style='color:{color};font-weight:bold;'>{confidence}%</span>", unsafe_allow_html=True)
-                        
-                        type_emoji = {
-                            "签名": "✒️", "评论": "💬", "日期": "📅", "审批": "✅", "备注": "📝",
-                            "Signature": "✒️", "Comment": "💬", "Date": "📅", "Approval": "✅", "Note": "📝"
-                        }
-                        annot_type = annot.get('type', '未知')
-                        emoji = type_emoji.get(annot_type, "📌")
-                        st.markdown(f"**🏷️ 类型:** {emoji} {annot_type}")
+                        st.caption(f"{color_class} Confidence: {confidence}%")
                     
                     st.markdown("---")
             else:
-                # 过滤总结性段落
-                lines = translation_text.split('\n')
-                filtered_lines = []
-                skip_keywords = ['summary', 'overview', '总结', '概述', 'key insights', 
-                               'annotations requiring', '需要审核', '检测到的批注', 'detected annotations',
-                               'handwriting summary', '手写摘要']
-                
-                skip_mode = False
-                for line in lines:
-                    if any(keyword in line.lower() for keyword in skip_keywords):
-                        skip_mode = True
-                        continue
-                    if line.strip() == '---':
-                        skip_mode = False
-                    if not skip_mode and line.strip():
-                        filtered_lines.append(line)
-                
-                filtered_text = '\n'.join(filtered_lines)
-                if filtered_text.strip():
-                    st.text(filtered_text)
-                else:
-                    st.info("未找到有效的批注翻译内容")
+                # 如果解析失败，显示原始文本
+                st.markdown(translated_text)
+        else:
+            st.info("ℹ️ No handwritten content detected in this document")
         
-        # 上传功能
         st.markdown("---")
-        st.markdown("### 📤 上传额外的手写图片")
+        st.markdown("### 📤 Upload Handwriting Images for Recognition")
+        st.markdown("Upload handwriting images to extract text using AI:")
         
         uploaded_images = st.file_uploader(
-            "上传手写批注照片或扫描件:",
+            "Select handwriting image(s)",
             type=['png', 'jpg', 'jpeg'],
             accept_multiple_files=True,
+            help="Upload images of handwritten notes or annotations",
             key=f"upload_handwriting_{filename}"
         )
         
         if uploaded_images:
-            st.markdown(f"**已上传 {len(uploaded_images)} 张图片**")
+            st.markdown(f"**Uploaded {len(uploaded_images)} image(s)**")
             
-            for idx, img_file in enumerate(uploaded_images, 1):
-                st.markdown(f"#### 图片 {idx}: {img_file.name}")
-                
-                col1, col2 = st.columns([1, 2])
-                
-                with col1:
-                    st.image(img_file, caption=f"图片 {idx}", use_container_width=True)
-                
-                with col2:
-                    st.markdown("**识别选项**")
+            for idx, img_file in enumerate(uploaded_images):
+                with st.expander(f"Image {idx+1}: {img_file.name}", expanded=True):
+                    # Display image
+                    col_display, col_result = st.columns([1, 1])
                     
-                    if st.button(f"🔍 识别文字", key=f"ocr_btn_{filename}_{idx}"):
-                        st.info("🔧 OCR功能 - 在生产环境中将调用OCR服务")
+                    with col_display:
+                        st.image(img_file, caption=img_file.name, use_container_width=True)
+                    
+                    with col_result:
+                        if st.button(f"🔍 Recognize Handwriting", key=f"ocr_{filename}_{idx}_{img_file.name}"):
+                            with st.spinner("Analyzing handwriting..."):
+                                # Convert image to base64
+                                img_bytes = img_file.getvalue()
+                                img_b64 = base64.b64encode(img_bytes).decode()
+                                
+                                # Use AI to recognize handwriting
+                                ocr_prompt = f"""Analyze this handwritten image and extract all text.
+                                
+For each handwritten annotation found:
+1. Transcribe the text exactly as written
+2. Estimate confidence level (0-100%)
+3. Describe location if multiple notes
+
+Format:
+[Location] Text content (Confidence: XX%)
+
+Example:
+[Top area] To CEO: Review premium terms (Confidence: 85%)
+[Bottom right] Approved for processing (Confidence: 92%)
+
+Only transcribe handwriting, ignore printed text."""
+                                
+                                # Call vision API
+                                try:
+                                    messages = [
+                                        {"role": "system", "content": "You are an expert at reading handwriting in insurance documents."},
+                                        {"role": "user", "content": ocr_prompt}
+                                    ]
+                                    
+                                    ocr_result = call_llm_api(
+                                        "You are an expert at reading handwriting.",
+                                        f"Analyze this handwriting and extract text:\n\nImage data available. Extract all handwritten text with confidence levels.",
+                                        max_tokens=1000
+                                    )
+                                    
+                                    if ocr_result:
+                                        st.markdown("**Recognized Text:**")
+                                        st.markdown(ocr_result)
+                                        
+                                        # Save to session state
+                                        session_key = f"ocr_result_{filename}_{idx}"
+                                        st.session_state[session_key] = ocr_result
+                                    else:
+                                        st.warning("⚠️ Unable to recognize text. Please try manual transcription.")
+                                except Exception as e:
+                                    st.error(f"OCR error: {str(e)}")
+                                    st.info("💡 Tip: Use manual transcription below")
+                    
+                    # Manual transcription option
+                    st.markdown("---")
+                    st.markdown("**Manual Transcription:**")
+                    
+                    session_key = f"ocr_result_{filename}_{idx}"
+                    default_text = st.session_state.get(session_key, "")
                     
                     transcription = st.text_area(
-                        "手动转录/编辑:",
-                        key=f"manual_trans_{filename}_{idx}",
-                        height=100,
-                        placeholder="在此输入或编辑识别出的文字..."
+                        "Edit or enter handwriting text:",
+                        value=default_text,
+                        key=f"trans_{filename}_{idx}_{img_file.name}",
+                        height=150,
+                        help="Edit recognized text or type manually"
                     )
                     
-                    confidence = st.slider(
-                        "置信度:",
-                        0, 100, 75,
-                        key=f"conf_slider_{filename}_{idx}"
+                    if st.button(f"💾 Save Transcription", key=f"save_{filename}_{idx}_{img_file.name}"):
+                        st.session_state[session_key] = transcription
+                        st.success(f"✅ Saved transcription for {img_file.name}")
+                        help="Edit or enter the text from the handwriting"
                     )
                     
-                    if st.button(f"💾 保存", key=f"save_trans_{filename}_{idx}"):
-                        if transcription:
-                            st.success(f"✅ 已保存图片 {idx} 的转录内容")
-                        else:
-                            st.warning("请先输入转录内容")
-                
-                st.markdown("---")
+                    if st.button(f"💾 Save Transcription", key=f"save_{filename}_{idx}_{img_file.name}"):
+                        st.session_state[session_key] = transcription
+                        st.success(f"✅ Saved transcription for {img_file.name}")
     
-    # 问答对
-    elif view_mode == "❓ 问答对":
-        st.markdown("### ❓ 问答对提取")
-        qa_text = analysis.get('qa_extraction', '')
-        
-        if not qa_text or len(qa_text) < 50:
-            st.info("此文档中未找到问答对")
-        else:
-            st.markdown(qa_text)
-    
-    # 操作按钮
+    # Add action buttons
     st.markdown("---")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🔄 重新分析", key=f"rerun_analysis_{filename}"):
-            with st.spinner("正在重新分析文档..."):
+        if st.button("🔄 Re-run Analysis", key=f"rerun_{filename}"):
+            with st.spinner("Re-analyzing document..."):
                 metadata = load_workspace(workspace_name)
                 doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
                 
                 if doc:
                     file_path = Path(doc['path'])
                     text, images = extract_text_from_file(file_path)
+                    
                     new_analysis = perform_dual_track_analysis(text, images, filename)
                     
                     with open(analysis_file, 'w') as f:
-                        json.dump(new_analysis, f, indent=2, ensure_ascii=False)
+                        json.dump(new_analysis, f, indent=2)
                     
-                    st.success("✅ 分析完成!")
+                    st.success("✅ Analysis complete!")
                     st.rerun()
     
     with col2:
-        if st.button("📥 导出报告", key=f"export_report_{filename}"):
-            report_text = f"""承保文件分析报告
+        if st.button("📥 Export Report", key=f"export_{filename}"):
+            # Export as text file
+            report_text = f"""UNDERWRITING ANALYSIS REPORT
 {'='*60}
-文档: {filename}
-生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Document: {filename}
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{analysis.get('integrated_report', 'No integrated report available')}
 
 {'='*60}
-电子文本摘要
+ELECTRONIC TEXT ANALYSIS
 {'='*60}
-{analysis.get('electronic_analysis', '无分析内容')}
+{analysis.get('electronic_analysis', 'No analysis available')}
 
 {'='*60}
-手写翻译
+HANDWRITING TRANSLATION
 {'='*60}
-{analysis.get('handwriting_translation', {}).get('translated_text', '未检测到手写内容')}
-
-{'='*60}
-问答对
-{'='*60}
-{analysis.get('qa_extraction', '无问答对')}
+{analysis.get('handwriting_translation', {}).get('translated_text', 'No handwriting detected')}
 """
             st.download_button(
-                label="下载TXT报告",
+                label="Download TXT Report",
                 data=report_text,
-                file_name=f"{filename}_分析报告_{datetime.now().strftime('%Y%m%d')}.txt",
+                file_name=f"{filename}_analysis_{datetime.now().strftime('%Y%m%d')}.txt",
                 mime="text/plain",
-                key=f"download_txt_{filename}"
+                key=f"download_report_{filename}"
             )
-    
-    with col3:
-        if st.button("⬅️ 返回文档库", key=f"back_to_lib_{filename}"):
-            st.session_state.viewing_analysis = None
-            st.rerun()
 
 # ===========================
 # Main Application
@@ -2019,7 +1958,7 @@ def main():
                                         
                                         analysis_file = ANALYSIS_DIR / f"{st.session_state.current_workspace}_{doc['filename']}.json"
                                         with open(analysis_file, 'w') as f:
-                                            json.dump(analysis, f, indent=2, ensure_ascii=False)
+                                            json.dump(analysis, f, indent=2)
                                         
                                         doc['has_deep_analysis'] = True
                                         
