@@ -1,997 +1,1858 @@
-"""
-Underwriting Assistant - Professional RAG+CoT System with Deep Analysis
-Enhanced Version with Multimodal Document Analysis
-
-Author: Enhanced for Mitsui Dataset Analysis
-Date: 2026-02-09
-"""
-
 import streamlit as st
-import os
 import json
-import hashlib
+import os
 from datetime import datetime
-from typing import List, Dict, Any
+from pathlib import Path
+import hashlib
+import re
+import traceback
+from typing import List, Dict, Any, Optional, Tuple
 import requests
-import PyPDF2
-from docx import Document as DocxDocument
+from io import BytesIO
 import base64
-import pandas as pd
-from PIL import Image
-import io
-import zipfile
-import tempfile
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+# ===========================
+# Configuration
+# ===========================
 
-DEEPSEEK_API_KEY = "sk-99bba2ce117444e197270f17d303e74f"
-DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-chat"
+VERSION = "2.6"
+APP_TITLE = "Enhanced Underwriting Assistant - Professional RAG+CoT System"
 
-DATA_DIR = "data"
-WORKSPACES_DIR = os.path.join(DATA_DIR, "workspaces")
-EMBEDDINGS_DIR = os.path.join(DATA_DIR, "embeddings")
-ANALYSIS_DIR = os.path.join(DATA_DIR, "analysis")
+# API Configuration
+DEFAULT_API_KEY = os.getenv("API_KEY", "sk-99bba2ce117444e197270f17d303e74f")
+API_BASE = "https://api.deepseek.com/v1"
+API_MODEL = "deepseek-chat"
 
-os.makedirs(WORKSPACES_DIR, exist_ok=True)
-os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
-os.makedirs(ANALYSIS_DIR, exist_ok=True)
+# Directory Structure
+DATA_DIR = Path("data")
+WORKSPACES_DIR = DATA_DIR / "workspaces"
+EMBEDDINGS_DIR = DATA_DIR / "embeddings"
+ANALYSIS_DIR = DATA_DIR / "analysis"
+REVIEW_DIR = DATA_DIR / "review_queue"
+AUDIT_DIR = DATA_DIR / "audit_logs"
+CONFIG_DIR = DATA_DIR / "config"
 
+# Initial dataset file
+INITIAL_DATASET = "Hull - Marco Polo_Memo.pdf"
+
+# Supported file formats
 SUPPORTED_FORMATS = {
-    "pdf": "📄 PDF", "docx": "📝 Word", "doc": "📝 Word",
-    "txt": "📃 Text", "xlsx": "📊 Excel", "xls": "📊 Excel",
-    "png": "🖼️ Image", "jpg": "🖼️ Image", "jpeg": "🖼️ Image"
+    'pdf': '📄 PDF',
+    'docx': '📝 Word',
+    'doc': '📝 Word',
+    'txt': '📃 Text',
+    'xlsx': '📊 Excel',
+    'xls': '📊 Excel',
+    'png': '🖼️ Image',
+    'jpg': '🖼️ Image',
+    'jpeg': '🖼️ Image'
 }
 
+# Tag categories
 TAG_OPTIONS = {
-    "equipment": ["Gas Turbine", "Steam Turbine", "Boiler", "Generator", "Compressor", 
-                  "Heat Exchanger", "Pump", "Transformer", "Motor", "Other"],
-    "industry": ["Oil & Gas", "Power Generation", "Manufacturing", "Chemical", 
-                 "Mining", "Refining", "Marine", "Aviation", "Other"],
-    "timeline": ["2025-Q4", "2025-Q3", "2025-Q2", "2025-Q1", "2024", "2023", "Earlier"]
+    'equipment': ['Hull', 'Cargo', 'Liability', 'Property', 'Marine', 'Aviation'],
+    'industry': ['Shipping', 'Manufacturing', 'Retail', 'Technology', 'Construction'],
+    'timeline': ['2024', '2025', '2026', 'Q1', 'Q2', 'Q3', 'Q4']
 }
 
-# ============================================================================
-# SYSTEM PROMPTS
-# ============================================================================
+# Insurance terminology dictionary
+INSURANCE_TERMS = {
+    'retention': 'The amount of risk that the insured retains before insurance coverage applies',
+    'premium': 'The amount paid for insurance coverage',
+    'coverage': 'The scope and extent of protection provided by an insurance policy',
+    'deductible': 'The amount the insured must pay before the insurer pays a claim',
+    'underwriting slip': 'A document containing key details of an insurance risk',
+    'loss ratio': 'The ratio of losses paid to premiums earned',
+    'exposure': 'The state of being subject to the possibility of loss',
+    'claims': 'Requests for compensation under an insurance policy',
+    'policy': 'A contract of insurance',
+    'endorsement': 'An amendment or addition to an insurance policy',
+    'exclusion': 'Specific conditions or circumstances that are not covered',
+    'limit': 'The maximum amount an insurer will pay for a covered loss',
+    'aggregate': 'The total limit of coverage for all claims during a policy period',
+    'per occurrence': 'The limit applicable to each individual claim or incident',
+    'retroactive date': 'The date from which coverage applies for claims-made policies'
+}
 
-SYSTEM_INSTRUCTION = """Role: You are Mr. X's AI underwriting assistant
+# ===========================
+# System Prompts
+# ===========================
 
-Task: Answer underwriting queries using retrieved cases
+SYSTEM_INSTRUCTION = """You are an expert underwriting assistant with deep knowledge of insurance policies, 
+risk assessment, and document analysis. Your role is to help underwriters make informed decisions by:
+1. Extracting and analyzing key information from policy documents
+2. Translating handwritten annotations into structured electronic text
+3. Identifying critical risk factors and coverage terms
+4. Providing comprehensive analysis with actionable insights
+5. Maintaining strict accuracy and professional standards
 
-Process: Think step-by-step using this framework:
+Always structure your responses in clear, professional JSON format when requested."""
 
-Step 1: Extract key tags from query
-Step 2: Analyze retrieved precedents
-Step 3: Check recency & applicability
-Step 4: Identify decision patterns
-Step 5: Recommend with rationale
+ELECTRONIC_TEXT_ANALYSIS_SYSTEM = """Analyze the electronic/printed text from this underwriting document.
 
-Output: Provide decision + premium + sources"""
+Extract and structure:
+1. Policy Details: insured name, policy number, coverage type, policy period, limits
+2. Premium Information: premium amount, payment terms, calculation basis
+3. Coverage Terms: covered perils, geographical scope, special conditions
+4. Exclusions: what is NOT covered
+5. Key Clauses: retention amounts, deductibles, sublimits
+6. Risk Assessment: nature of risk, exposure factors, loss history
+7. Underwriter Notes: any decision points or special considerations
 
-DOCUMENT_ANALYSIS_SYSTEM = """You are a professional document analyst specializing in multimodal content analysis.
-
-Your task: Analyze documents (insurance, business, technical) that contain BOTH:
-1. Electronic printed text (tables, forms, typed content)
-2. Handwritten annotations (notes, comments, markups)
-
-Analysis Framework:
-
-**STEP 1: Document Overview**
-- Document type and purpose
-- Overall structure and layout
-- Main content categories
-
-**STEP 2: Content Classification**
-- Electronic text areas (tables, forms, typed sections)
-- Handwritten text areas (annotations, signatures, notes)
-- Mixed areas (handwriting over printed text)
-
-**STEP 3: Text Extraction Analysis**
-- Key information from printed text
-- Important handwritten notes and their context
-- Relationships between handwritten and printed content
-
-**STEP 4: Visual Elements**
-- Charts, diagrams, tables
-- Images embedded in the document
-- Highlighting, underlines, arrows
-
-**STEP 5: Business Intelligence**
-- Key decisions or approvals indicated
-- Risk factors identified
-- Action items or follow-ups noted
-- Calculations or formulas
-
-**STEP 6: OCR Challenges Identified**
-- Areas difficult for standard OCR
-- Handwriting recognition challenges
-- Mixed content overlap issues
-
-Output: Structured JSON report with comprehensive analysis."""
-
-AUTO_ANNOTATE_SYSTEM = """You are an underwriting document auto-tagger.
-Given raw extracted text and the filename, produce a STRICT JSON object with:
+Return ONLY valid JSON with this structure:
 {
-  "tags": {"equipment": string[], "industry": string[], "timeline": string[]},
-  "decision": "Approved" | "Declined" | "Conditional" | "Pending",
-  "premium": number,
-  "risk_level": "Low" | "Medium" | "Medium-High" | "High" | "Critical",
-  "case_summary": string,
-  "key_insights": string
-}
-Rules:
-- Return ONLY valid JSON. No commentary.
-- If unavailable, use 'Other' / 'Earlier' conservatively.
-"""
+  "policy_details": {...},
+  "premium_info": {...},
+  "coverage_terms": {...},
+  "exclusions": [...],
+  "key_clauses": {...},
+  "risk_assessment": {...},
+  "underwriter_notes": [...],
+  "key_entities": [...]
+}"""
 
-# ============================================================================
-# API & UTILITY FUNCTIONS
-# ============================================================================
+HANDWRITING_TRANSLATION_SYSTEM = """Translate and analyze handwritten annotations from this underwriting document.
 
-def call_deepseek_api(messages: List[Dict[str, str]], temperature: float = 0.7, max_tokens: int = 2000) -> str:
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
-    payload = {"model": DEEPSEEK_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
-    try:
-        resp = requests.post(f"{DEEPSEEK_API_BASE}/chat/completions", headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"❌ API Error: {str(e)}"
+Your task:
+1. **OCR Confidence Assessment**: Evaluate handwriting quality (Clear/Standard/Cursive)
+2. **Text Translation**: Convert handwritten text to clean electronic text
+3. **Context Preservation**: Maintain the meaning and intent of annotations
+4. **Location Tracking**: Note which page/section the handwriting refers to
+5. **Summary**: Provide a brief summary of handwritten content
 
-def extract_text_from_pdf(file_path: str) -> str:
-    try:
-        with open(file_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            return "".join([page.extract_text() or "" for page in pdf_reader.pages])
-    except Exception as e:
-        return f"Error extracting PDF: {str(e)}"
+Handwriting Quality Tiers:
+- CLEAR (70-100%): Clean, printed handwriting - high confidence OCR
+- STANDARD (40-70%): Normal cursive - moderate confidence, may need human review
+- CURSIVE (<40%): Difficult to read - requires human verification
 
-def extract_text_from_docx(file_path: str) -> str:
-    try:
-        doc = DocxDocument(file_path)
-        return "\n".join([p.text for p in doc.paragraphs])
-    except Exception as e:
-        return f"Error extracting DOCX: {str(e)}"
-
-def extract_text_from_txt(file_path: str) -> str:
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except Exception as e:
-        return f"Error reading TXT: {str(e)}"
-
-def extract_text_from_file(file_path: str, file_format: str) -> str:
-    extractors = {"pdf": extract_text_from_pdf, "docx": extract_text_from_docx, 
-                  "doc": extract_text_from_docx, "txt": extract_text_from_txt}
-    return extractors.get(file_format, lambda x: "")(file_path)
-
-def generate_embedding(text: str) -> List[float]:
-    text_hash = hashlib.md5((text or "").encode()).hexdigest()
-    fake = [float(int(text_hash[i:i+2], 16)) / 255.0 for i in range(0, 32, 2)]
-    return (fake + [0.0] * 1536)[:1536]
-
-def cosine_similarity(v1: List[float], v2: List[float]) -> float:
-    dot = sum(a*b for a,b in zip(v1, v2))
-    m1, m2 = sum(a*a for a in v1) ** 0.5, sum(b*b for b in v2) ** 0.5
-    return dot / (m1 * m2) if m1 and m2 else 0.0
-
-def file_to_data_uri(path: str, mime: str) -> str:
-    with open(path, "rb") as f:
-        return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
-
-# ============================================================================
-# DEEP ANALYSIS FUNCTIONS
-# ============================================================================
-
-def extract_images_from_docx(docx_path: str, output_dir: str) -> List[Dict[str, str]]:
-    """Extract all images from DOCX file"""
-    images_info = []
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        with zipfile.ZipFile(docx_path, 'r') as zip_ref:
-            for file_info in zip_ref.filelist:
-                if file_info.filename.startswith('word/media/'):
-                    filename = os.path.basename(file_info.filename)
-                    if any(filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.emf', '.wmf']):
-                        extracted_path = zip_ref.extract(file_info, output_dir)
-                        ext = filename.split('.')[-1].lower()
-                        images_info.append({
-                            "image_id": filename.split('.')[0],
-                            "filename": filename,
-                            "path": extracted_path,
-                            "format": ext
-                        })
-        return images_info
-    except Exception as e:
-        st.error(f"Error extracting images: {e}")
-        return []
-
-def analyze_single_image_with_llm(image_path: str, image_id: str) -> Dict[str, Any]:
-    """Analyze single image (simulated for non-vision models)"""
-    return {
-        "image_id": image_id,
-        "type": "Mixed Content",
-        "electronic_text_detected": True,
-        "handwritten_text_detected": True,
-        "ocr_difficulty": 3,
-        "key_elements": ["Tables with financial data", "Handwritten annotations", "Charts"],
-        "insights": f"Image {image_id} contains mixed content requiring multimodal OCR"
+Return ONLY valid JSON:
+{
+  "translated_annotations": [
+    {
+      "image_id": "string",
+      "location": "string (e.g., Page 2, margin)",
+      "confidence_tier": "CLEAR|STANDARD|CURSIVE",
+      "confidence_score": 0.0-1.0,
+      "original_text_detected": "string",
+      "translated_text": "string (clean electronic version)",
+      "context": "string (what this annotation refers to)"
     }
+  ],
+  "handwriting_summary": "string (overall summary of handwritten content)",
+  "needs_human_review": ["list of image_ids that need verification"],
+  "key_insights_from_handwriting": ["list of important points from annotations"]
+}"""
 
-def perform_deep_document_analysis(file_path: str, file_format: str, filename: str, doc_id: str) -> Dict[str, Any]:
-    """Perform comprehensive document analysis"""
-    analysis_result = {
-        "doc_id": doc_id, "filename": filename, "analysis_date": datetime.now().isoformat(),
-        "file_format": file_format, "text_analysis": {}, "image_analysis": [],
-        "comprehensive_report": "", "metadata": {}
+QA_EXTRACTION_SYSTEM = """Extract Question-Answer pairs from this underwriting document.
+
+Look for:
+1. Formal Q&A sections (A1, A2, Q1, Q2 format)
+2. Email correspondence with questions and responses
+3. Underwriter queries and client responses
+4. Risk assessment questions
+
+Return ONLY valid JSON:
+{
+  "qa_pairs": [
+    {
+      "question_id": "string",
+      "question": "string",
+      "answer": "string",
+      "source": "string (document section/page)",
+      "category": "string (risk/coverage/claims/other)"
     }
+  ],
+  "total_pairs": number
+}"""
+
+AUTO_ANNOTATE_SYSTEM = """Automatically annotate this underwriting document with key metadata.
+
+Analyze the document and extract:
+1. Tags: relevant categorization (equipment/industry/timeline)
+2. Insurance Type: specific type of insurance
+3. Decision: preliminary risk decision (Accept/Review/Decline/Pending)
+4. Premium: estimated premium amount
+5. Risk Level: Low/Medium/High/Critical
+6. Case Summary: brief executive summary
+7. Key Insights: most important findings
+
+Return ONLY valid JSON:
+{
+  "tags": ["tag1", "tag2", "tag3"],
+  "insurance_type": "string",
+  "decision": "Accept|Review|Decline|Pending",
+  "premium_estimate": "string",
+  "retention": "string",
+  "risk_level": "Low|Medium|High|Critical",
+  "case_summary": "string (2-3 sentences)",
+  "key_insights": ["insight1", "insight2", "insight3"],
+  "confidence": 0.0-1.0
+}"""
+
+# ===========================
+# Configuration Management
+# ===========================
+
+def ensure_dirs():
+    """Create necessary directories"""
+    for dir_path in [WORKSPACES_DIR, EMBEDDINGS_DIR, ANALYSIS_DIR, REVIEW_DIR, AUDIT_DIR, CONFIG_DIR]:
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+def load_api_config() -> Dict:
+    """Load API configuration"""
+    config_file = CONFIG_DIR / "api_config.json"
     
+    if config_file.exists():
+        try:
+            with open(config_file, 'r') as f:
+                return json.load(f)
+        except:
+            pass
+    
+    return {"api_key": DEFAULT_API_KEY}
+
+def save_api_config(api_key: str):
+    """Save API configuration"""
+    config_file = CONFIG_DIR / "api_config.json"
+    
+    with open(config_file, 'w') as f:
+        json.dump({"api_key": api_key}, f)
+
+def get_api_key() -> str:
+    """Get API key from config or session state"""
+    if 'api_key' in st.session_state and st.session_state.api_key:
+        return st.session_state.api_key
+    
+    config = load_api_config()
+    return config.get('api_key', DEFAULT_API_KEY)
+
+def validate_api_key(api_key: str) -> Tuple[bool, str]:
+    """Validate API key and test connection"""
+    if not api_key:
+        return False, "API key is empty"
+    
+    # Test connection
     try:
-        # Step 1: Extract text
-        st.info("📝 Step 1/5: Extracting text content...")
-        extracted_text = extract_text_from_file(file_path, file_format)
-        analysis_result["metadata"].update({
-            "text_length": len(extracted_text),
-            "has_text": len(extracted_text) > 0
-        })
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         
-        # Step 2: Extract images
-        st.info("🖼️ Step 2/5: Extracting images from document...")
-        images_info = []
-        temp_image_dir = tempfile.mkdtemp(prefix=f"doc_analysis_{doc_id}_")
+        payload = {
+            "model": API_MODEL,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 10
+        }
         
-        if file_format == "docx":
-            images_info = extract_images_from_docx(file_path, temp_image_dir)
-        
-        analysis_result["metadata"].update({
-            "image_count": len(images_info),
-            "has_images": len(images_info) > 0
-        })
-        
-        # Step 3: Analyze text with LLM
-        if extracted_text:
-            st.info("🤖 Step 3/5: Analyzing text content with DeepSeek CoT...")
-            text_analysis_prompt = f"""Document: {filename}
-Format: {file_format}
-
-Extracted Text Content:
-{extracted_text[:5000]}
-
-Please analyze this document following the CoT framework:
-1. Document type and structure
-2. Key information categories
-3. Business intelligence (decisions, risks, actions)
-4. Notable patterns or anomalies
-
-Provide a structured analysis in JSON format."""
-            
-            text_analysis_response = call_deepseek_api(
-                messages=[
-                    {"role": "system", "content": DOCUMENT_ANALYSIS_SYSTEM},
-                    {"role": "user", "content": text_analysis_prompt}
-                ],
-                temperature=0.3, max_tokens=1500
-            )
-            
-            try:
-                cleaned = text_analysis_response.strip().strip("`")
-                if "\n" in cleaned:
-                    cleaned = cleaned.split("\n", 1)[1] if cleaned.startswith("```") else cleaned
-                if cleaned.endswith("```"):
-                    cleaned = cleaned.rsplit("```", 1)[0]
-                analysis_result["text_analysis"] = json.loads(cleaned)
-            except:
-                analysis_result["text_analysis"] = {
-                    "raw_response": text_analysis_response,
-                    "note": "Could not parse as JSON"
-                }
-        
-        # Step 4: Analyze images
-        if images_info:
-            st.info(f"🔍 Step 4/5: Analyzing {len(images_info)} images...")
-            progress_bar = st.progress(0)
-            
-            for idx, img_info in enumerate(images_info):
-                if img_info["format"] in ["png", "jpg", "jpeg"]:
-                    img_analysis = analyze_single_image_with_llm(img_info["path"], img_info["image_id"])
-                    analysis_result["image_analysis"].append(img_analysis)
-                else:
-                    analysis_result["image_analysis"].append({
-                        "image_id": img_info["image_id"],
-                        "format": img_info["format"],
-                        "note": f"Format {img_info['format']} requires conversion"
-                    })
-                progress_bar.progress((idx + 1) / len(images_info))
-        
-        # Step 5: Generate comprehensive report
-        st.info("📊 Step 5/5: Generating comprehensive analysis report...")
-        report_prompt = f"""Based on the following analysis, generate a comprehensive document analysis report:
-
-Filename: {filename}
-Format: {file_format}
-Text Length: {analysis_result['metadata']['text_length']} characters
-Images Found: {analysis_result['metadata']['image_count']}
-
-Text Analysis Summary:
-{json.dumps(analysis_result['text_analysis'], indent=2, ensure_ascii=False)[:2000]}
-
-Image Analysis Summary:
-{json.dumps(analysis_result['image_analysis'], indent=2, ensure_ascii=False)[:2000]}
-
-Please provide:
-1. Executive Summary
-2. Content Classification (Electronic vs Handwritten)
-3. Key Findings
-4. Business Intelligence Extracted
-5. OCR/Processing Challenges
-6. Recommendations
-
-Format as a structured report."""
-        
-        comprehensive_report = call_deepseek_api(
-            messages=[
-                {"role": "system", "content": "You are a document analysis expert. Generate clear, actionable reports."},
-                {"role": "user", "content": report_prompt}
-            ],
-            temperature=0.4, max_tokens=2000
+        response = requests.post(
+            f"{API_BASE}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=10
         )
         
-        analysis_result["comprehensive_report"] = comprehensive_report
+        if response.status_code == 200:
+            return True, "API key is valid"
+        elif response.status_code == 401:
+            return False, "API key is invalid or unauthorized"
+        else:
+            return False, f"API error: {response.status_code}"
+            
+    except Exception as e:
+        return False, f"Connection error: {str(e)}"
+
+# ===========================
+# Utility Functions
+# ===========================
+
+def log_audit_event(event_type: str, details: Dict[str, Any]):
+    """Log audit events for compliance tracking"""
+    try:
+        timestamp = datetime.now().isoformat()
+        log_entry = {
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "details": details,
+            "user": "system"
+        }
         
-        # Save analysis
-        analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_analysis.json")
-        with open(analysis_file, 'w', encoding='utf-8') as f:
-            json.dump(analysis_result, f, ensure_ascii=False, indent=2)
+        log_file = AUDIT_DIR / f"audit_{datetime.now().strftime('%Y%m')}.jsonl"
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry) + '\n')
+    except Exception as e:
+        st.warning(f"Failed to log audit event: {e}")
+
+def preprocess_insurance_text(text: str) -> str:
+    """Preprocess text with insurance terminology awareness"""
+    processed = text.lower()
+    
+    # Normalize insurance terms
+    for term in INSURANCE_TERMS.keys():
+        processed = re.sub(rf'\b{term}s?\b', term, processed, flags=re.IGNORECASE)
+    
+    # Clean extra whitespace
+    processed = re.sub(r'\s+', ' ', processed).strip()
+    
+    return processed
+
+def generate_embedding(text: str) -> List[float]:
+    """Generate embedding vector for text (simplified version using hash)"""
+    hash_obj = hashlib.sha256(preprocess_insurance_text(text).encode())
+    hash_int = int.from_bytes(hash_obj.digest(), byteorder='big')
+    
+    embedding = []
+    for i in range(1536):
+        seed = hash_int + i
+        embedding.append((seed % 1000) / 1000.0 - 0.5)
+    
+    return embedding
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calculate cosine similarity between two vectors"""
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    magnitude1 = sum(a * a for a in vec1) ** 0.5
+    magnitude2 = sum(b * b for b in vec2) ** 0.5
+    
+    if magnitude1 == 0 or magnitude2 == 0:
+        return 0.0
+    
+    return dot_product / (magnitude1 * magnitude2)
+
+def extract_tag_from_filename(filename: str) -> Optional[str]:
+    """Extract primary tag from filename (first word before space/underscore/dash)"""
+    name_without_ext = os.path.splitext(filename)[0]
+    parts = re.split(r'[\s_\-]+', name_without_ext)
+    
+    if not parts:
+        return None
+    
+    first_word = parts[0].strip().title()
+    
+    if first_word.isdigit() or re.match(r'\d{4}', first_word):
+        return None
+    
+    return first_word
+
+def call_llm_api(system_prompt: str, user_prompt: str, 
+                 temperature: float = 0.3, max_tokens: int = 4000) -> str:
+    """Call LLM API for text generation"""
+    try:
+        api_key = get_api_key()
         
-        st.success("✅ Deep analysis completed!")
-        return analysis_result
+        if not api_key:
+            st.error("⚠️ API key not configured. Please set it in the sidebar.")
+            return "{}"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": API_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        response = requests.post(
+            f"{API_BASE}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        
+        if response.status_code == 401:
+            st.error("⚠️ API Authentication Failed. Please check your API key in the sidebar.")
+            return "{}"
+        
+        response.raise_for_status()
+        result = response.json()
+        
+        return result['choices'][0]['message']['content']
+        
+    except requests.exceptions.HTTPError as e:
+        st.error(f"API HTTP Error: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            st.error(f"Response: {e.response.text}")
+        return "{}"
+    except Exception as e:
+        st.error(f"API Error: {e}")
+        return "{}"
+
+# ===========================
+# File Processing Functions
+# ===========================
+
+def extract_text_from_pdf(file_path: Path) -> str:
+    """Extract text from PDF file"""
+    try:
+        import PyPDF2
+        text = ""
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n\n"
+        return text
+    except Exception as e:
+        st.warning(f"PDF extraction error: {e}")
+        return ""
+
+def extract_text_from_docx(file_path: Path) -> str:
+    """Extract text from DOCX file"""
+    try:
+        from docx import Document
+        doc = Document(file_path)
+        text = "\n\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        return text
+    except Exception as e:
+        st.warning(f"DOCX extraction error: {e}")
+        return ""
+
+def extract_text_from_txt(file_path: Path) -> str:
+    """Extract text from TXT file"""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+    except Exception as e:
+        st.warning(f"TXT extraction error: {e}")
+        return ""
+
+def extract_text_from_file(file_path: Path) -> str:
+    """Extract text based on file type"""
+    ext = file_path.suffix.lower().lstrip('.')
+    
+    if ext == 'pdf':
+        return extract_text_from_pdf(file_path)
+    elif ext in ['docx', 'doc']:
+        return extract_text_from_docx(file_path)
+    elif ext == 'txt':
+        return extract_text_from_txt(file_path)
+    else:
+        return ""
+
+def extract_images_from_docx(file_path: Path) -> List[Dict]:
+    """Extract embedded images from DOCX file (simulated handwriting)"""
+    try:
+        from docx import Document
+        doc = Document(file_path)
+        images = []
+        
+        for rel in doc.part.rels.values():
+            if "image" in rel.target_ref:
+                image_data = rel.target_part.blob
+                image_id = f"img_{len(images)+1}"
+                
+                images.append({
+                    'id': image_id,
+                    'data': base64.b64encode(image_data).decode('utf-8'),
+                    'type': 'embedded',
+                    'source_file': file_path.name
+                })
+        
+        return images
+    except Exception as e:
+        st.warning(f"Image extraction error: {e}")
+        return []
+
+def classify_handwriting_quality(image_data: str) -> Tuple[str, float]:
+    """Classify handwriting quality (simulated)"""
+    hash_val = int(hashlib.md5(image_data[:100].encode()).hexdigest(), 16) % 100
+    
+    if hash_val > 70:
+        return "CLEAR", 0.85
+    elif hash_val > 40:
+        return "STANDARD", 0.60
+    else:
+        return "CURSIVE", 0.30
+
+# ===========================
+# Core Analysis Functions
+# ===========================
+
+def auto_generate_tags(filename: str, text_preview: str) -> List[str]:
+    """Auto-generate tags from filename and content"""
+    tags = []
+    
+    # Add filename-based tag
+    filename_tag = extract_tag_from_filename(filename)
+    if filename_tag:
+        tags.append(filename_tag)
+    
+    # Extract from content
+    text_lower = text_preview.lower()
+    
+    # Equipment tags
+    for tag in TAG_OPTIONS['equipment']:
+        if tag.lower() in text_lower:
+            tags.append(tag)
+    
+    # Industry tags
+    for tag in TAG_OPTIONS['industry']:
+        if tag.lower() in text_lower:
+            tags.append(tag)
+    
+    # Timeline tags
+    for tag in TAG_OPTIONS['timeline']:
+        if tag in text_preview:
+            tags.append(tag)
+    
+    return list(set(tags))[:5]
+
+def extract_qa_pairs(text: str, filename: str) -> Dict:
+    """Extract Q&A pairs using LLM"""
+    try:
+        user_prompt = f"""Document: {filename}
+
+Content:
+{text[:3000]}
+
+Extract all question-answer pairs from this underwriting document."""
+
+        response = call_llm_api(QA_EXTRACTION_SYSTEM, user_prompt)
+        
+        if response == "{}":
+            return {"qa_pairs": [], "total_pairs": 0}
+        
+        qa_data = json.loads(response)
+        return qa_data
+        
+    except json.JSONDecodeError:
+        return {"qa_pairs": [], "total_pairs": 0}
+    except Exception as e:
+        st.warning(f"Q&A extraction error: {e}")
+        return {"qa_pairs": [], "total_pairs": 0}
+
+def analyze_electronic_text(text: str, filename: str) -> Dict:
+    """Analyze electronic/printed text"""
+    try:
+        user_prompt = f"""Document: {filename}
+
+Content:
+{text[:4000]}
+
+Perform comprehensive analysis of this underwriting document."""
+
+        response = call_llm_api(ELECTRONIC_TEXT_ANALYSIS_SYSTEM, user_prompt)
+        
+        if response == "{}":
+            return {
+                "policy_details": {},
+                "premium_info": {},
+                "coverage_terms": {},
+                "exclusions": [],
+                "key_clauses": {},
+                "risk_assessment": {},
+                "underwriter_notes": [],
+                "key_entities": []
+            }
+        
+        analysis = json.loads(response)
+        return analysis
+        
+    except json.JSONDecodeError:
+        return {
+            "policy_details": {},
+            "premium_info": {},
+            "coverage_terms": {},
+            "exclusions": [],
+            "key_clauses": {},
+            "risk_assessment": {},
+            "underwriter_notes": [],
+            "key_entities": []
+        }
+    except Exception as e:
+        st.warning(f"Electronic text analysis error: {e}")
+        return {}
+
+def translate_handwriting(images: List[Dict], filename: str) -> Dict:
+    """Translate handwritten annotations to electronic text"""
+    try:
+        if not images:
+            return {
+                "translated_annotations": [],
+                "handwriting_summary": "No handwritten content detected",
+                "needs_human_review": [],
+                "key_insights_from_handwriting": []
+            }
+        
+        translated_annotations = []
+        needs_review = []
+        
+        for img in images:
+            tier, confidence = classify_handwriting_quality(img.get('data', ''))
+            
+            simulated_text = f"Handwritten note from {img['source_file']}"
+            
+            annotation = {
+                "image_id": img['id'],
+                "location": f"Embedded in {filename}",
+                "confidence_tier": tier,
+                "confidence_score": confidence,
+                "original_text_detected": simulated_text,
+                "translated_text": simulated_text.upper(),
+                "context": "Annotation related to policy terms"
+            }
+            
+            translated_annotations.append(annotation)
+            
+            if tier in ["STANDARD", "CURSIVE"]:
+                needs_review.append(img['id'])
+        
+        user_prompt = f"""Handwritten annotations detected: {len(images)}
+
+Simulated translations:
+{json.dumps(translated_annotations, indent=2)}
+
+Provide a summary of the handwritten content and key insights."""
+
+        response = call_llm_api(HANDWRITING_TRANSLATION_SYSTEM, user_prompt, temperature=0.2)
+        
+        if response == "{}":
+            return {
+                "translated_annotations": translated_annotations,
+                "handwriting_summary": "Handwritten annotations detected and translated",
+                "needs_human_review": needs_review,
+                "key_insights_from_handwriting": ["Manual review recommended for accuracy"]
+            }
+        
+        try:
+            result = json.loads(response)
+        except:
+            result = {
+                "translated_annotations": translated_annotations,
+                "handwriting_summary": "Handwritten annotations detected and translated",
+                "needs_human_review": needs_review,
+                "key_insights_from_handwriting": ["Manual review recommended for accuracy"]
+            }
+        
+        return result
         
     except Exception as e:
-        st.error(f"❌ Analysis failed: {str(e)}")
-        analysis_result["error"] = str(e)
-        return analysis_result
-
-def auto_annotate_by_llm(extracted_text: str, filename: str) -> Dict[str, Any]:
-    """Auto-annotate document using LLM"""
-    user_prompt = f"FILENAME: {filename}\nTEXT:\n{(extracted_text or '')[:4000]}"
-    content = call_deepseek_api(
-        messages=[{"role":"system","content":AUTO_ANNOTATE_SYSTEM},
-                  {"role":"user","content":user_prompt}],
-        temperature=0.2, max_tokens=700
-    )
-    try:
-        cleaned = content.strip().strip("`")
-        if "\n" in cleaned and cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        data = json.loads(cleaned)
-    except:
-        data = {
-            "tags":{"equipment":["Other"],"industry":["Other"],"timeline":["Earlier"]},
-            "decision":"Pending","premium":0,"risk_level":"Medium",
-            "case_summary":"Auto-tagging failed. Placeholder values used.",
-            "key_insights":"Please re-run auto-tagging if needed."
-        }
-    
-    for key in ["tags", "decision", "premium", "risk_level", "case_summary", "key_insights"]:
-        data.setdefault(key, {} if key == "tags" else ("Pending" if key == "decision" else 
-                        (0 if key == "premium" else ("Medium" if key == "risk_level" else ""))))
-    if "tags" in data:
-        for tag_type in ["equipment", "industry", "timeline"]:
-            data["tags"].setdefault(tag_type, ["Other"] if tag_type != "timeline" else ["Earlier"])
-    
-    return data
-
-# ============================================================================
-# WORKSPACE CLASS
-# ============================================================================
-
-class Workspace:
-    def __init__(self, name: str):
-        self.name = name
-        self.workspace_dir = os.path.join(WORKSPACES_DIR, name)
-        self.documents_dir = os.path.join(self.workspace_dir, "documents")
-        self.metadata_file = os.path.join(self.workspace_dir, "metadata.json")
-        self.embeddings_file = os.path.join(self.workspace_dir, "embeddings.json")
-        os.makedirs(self.documents_dir, exist_ok=True)
-        self.metadata = self._load_metadata()
-        self.embeddings = self._load_embeddings()
-    
-    def _load_metadata(self):
-        if os.path.exists(self.metadata_file):
-            with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return []
-    
-    def _save_metadata(self):
-        with open(self.metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(self.metadata, f, ensure_ascii=False, indent=2)
-    
-    def _load_embeddings(self):
-        if os.path.exists(self.embeddings_file):
-            with open(self.embeddings_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
-    
-    def _save_embeddings(self):
-        with open(self.embeddings_file, 'w', encoding='utf-8') as f:
-            json.dump(self.embeddings, f, indent=2)
-    
-    def add_document(self, uploaded_file, tags: Dict[str, List[str]], 
-                     case_summary: str, key_insights: str, decision: str, 
-                     premium: int, risk_level: str, extracted_text_preview: str = "",
-                     has_deep_analysis: bool = False) -> Dict[str, Any]:
-        doc_id = f"DOC-{datetime.now().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(uploaded_file.name.encode()).hexdigest()[:6].upper()}"
-        ext = uploaded_file.name.split('.')[-1].lower()
-        filename = f"{doc_id}.{ext}"
-        file_path = os.path.join(self.documents_dir, filename)
-        
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        full_text = f"{case_summary} {key_insights} {extracted_text_preview[:1000]}"
-        embedding = generate_embedding(full_text)
-        
-        doc_meta = {
-            "doc_id": doc_id, "filename": uploaded_file.name, "file_format": ext,
-            "file_path": file_path, "file_size_kb": uploaded_file.size/1024,
-            "upload_date": datetime.now().isoformat(), "tags": tags,
-            "decision": decision, "premium": premium, "risk_level": risk_level,
-            "case_summary": case_summary, "key_insights": key_insights,
-            "extracted_text_preview": extracted_text_preview[:500],
-            "has_deep_analysis": has_deep_analysis
-        }
-        
-        self.metadata.append(doc_meta)
-        self.embeddings[doc_id] = embedding
-        self._save_metadata()
-        self._save_embeddings()
-        return doc_meta
-    
-    def search_documents(self, query: str, top_k: int = 5):
-        if not self.metadata:
-            return []
-        qv = generate_embedding(query)
-        scored = []
-        for doc in self.metadata:
-            doc_id = doc["doc_id"]
-            if doc_id in self.embeddings:
-                sim = cosine_similarity(qv, self.embeddings[doc_id])
-                ql = query.lower()
-                for tag_list in doc["tags"].values():
-                    for tag in tag_list:
-                        if tag.lower() in ql:
-                            sim += 0.1
-                scored.append((sim, doc))
-        scored.sort(reverse=True, key=lambda x: x[0])
-        return [d for _, d in scored[:top_k]]
-    
-    def delete_document(self, doc_id: str):
-        self.metadata = [d for d in self.metadata if d["doc_id"] != doc_id]
-        if doc_id in self.embeddings:
-            del self.embeddings[doc_id]
-        for fn in os.listdir(self.documents_dir):
-            if fn.startswith(doc_id):
-                os.remove(os.path.join(self.documents_dir, fn))
-        analysis_file = os.path.join(ANALYSIS_DIR, f"{doc_id}_analysis.json")
-        if os.path.exists(analysis_file):
-            os.remove(analysis_file)
-        self._save_metadata()
-        self._save_embeddings()
-    
-    def get_stats(self):
+        st.warning(f"Handwriting translation error: {e}")
+        traceback.print_exc()
         return {
-            "total_documents": len(self.metadata),
-            "total_size_mb": sum(d["file_size_kb"] for d in self.metadata)/1024 if self.metadata else 0.0,
-            "format_distribution": self._get_fmt_dist(),
-            "decision_distribution": self._get_decision_dist(),
-            "analyzed_documents": sum(1 for d in self.metadata if d.get("has_deep_analysis", False))
+            "translated_annotations": [],
+            "handwriting_summary": "Translation failed",
+            "needs_human_review": [],
+            "key_insights_from_handwriting": []
         }
-    
-    def _get_fmt_dist(self):
-        dist = {}
-        for d in self.metadata:
-            dist[d["file_format"]] = dist.get(d["file_format"], 0) + 1
-        return dist
-    
-    def _get_decision_dist(self):
-        dist = {}
-        for d in self.metadata:
-            dist[d["decision"]] = dist.get(d["decision"], 0) + 1
-        return dist
 
-def get_all_workspaces() -> List[str]:
-    if not os.path.exists(WORKSPACES_DIR):
+def perform_dual_track_analysis(text: str, images: List[Dict], filename: str) -> Dict:
+    """Perform comprehensive dual-track analysis with handwriting integration"""
+    try:
+        # Track 1: Electronic text analysis
+        electronic_analysis = analyze_electronic_text(text, filename)
+        
+        # Track 2: Handwriting translation
+        handwriting_translation = translate_handwriting(images, filename)
+        
+        # Extract Q&A pairs
+        qa_pairs = extract_qa_pairs(text, filename)
+        
+        # Integrate handwriting into full analysis
+        translated_text = "\n".join([
+            ann['translated_text'] 
+            for ann in handwriting_translation.get('translated_annotations', [])
+        ])
+        
+        # Combined analysis
+        integration_prompt = f"""Integrate the following analysis components into a comprehensive underwriting report:
+
+ELECTRONIC TEXT ANALYSIS:
+{json.dumps(electronic_analysis, indent=2)}
+
+TRANSLATED HANDWRITING:
+{handwriting_translation.get('handwriting_summary', 'None')}
+{translated_text}
+
+Q&A PAIRS:
+{json.dumps(qa_pairs, indent=2)}
+
+Provide:
+1. Executive Summary (incorporating handwritten insights)
+2. Risk Assessment
+3. Recommendations
+4. Critical Action Items"""
+
+        integration_response = call_llm_api(SYSTEM_INSTRUCTION, integration_prompt)
+        
+        # Combine all results
+        full_analysis = {
+            "electronic_analysis": electronic_analysis,
+            "handwriting_translation": handwriting_translation,
+            "qa_extraction": qa_pairs,
+            "integrated_report": integration_response if integration_response != "{}" else "Analysis integration failed - API may be unavailable",
+            "analysis_timestamp": datetime.now().isoformat()
+        }
+        
+        return full_analysis
+        
+    except Exception as e:
+        st.error(f"Dual-track analysis error: {e}")
+        traceback.print_exc()
+        return {}
+
+def auto_annotate_by_llm(filename: str, text: str, existing_tags: List[str] = None) -> Dict:
+    """Auto-annotate document using LLM"""
+    # Initialize auto_tags at the beginning
+    auto_tags = []
+    
+    try:
+        filename_tag = extract_tag_from_filename(filename)
+        auto_tags = auto_generate_tags(filename, text[:2000])
+        
+        if existing_tags:
+            auto_tags.extend(existing_tags)
+        auto_tags = list(set(auto_tags))
+        
+        user_prompt = f"""Document: {filename}
+Existing tags: {', '.join(auto_tags)}
+
+Content preview:
+{text[:3000]}
+
+Provide comprehensive auto-annotation for this underwriting document."""
+
+        response = call_llm_api(AUTO_ANNOTATE_SYSTEM, user_prompt, temperature=0.3)
+        
+        if response == "{}":
+            return {
+                'tags': auto_tags if auto_tags else ['Unclassified'],
+                'insurance_type': 'General',
+                'decision': 'Pending',
+                'premium_estimate': 'TBD',
+                'retention': 'TBD',
+                'risk_level': 'Medium',
+                'case_summary': 'API unavailable - manual review required',
+                'key_insights': ['Requires manual analysis'],
+                'confidence': 0.3
+            }
+        
+        try:
+            annotations = json.loads(response)
+            
+            # Merge filename-based tags
+            if filename_tag and filename_tag not in annotations.get('tags', []):
+                annotations['tags'].insert(0, filename_tag)
+            
+            # Ensure required fields
+            annotations.setdefault('tags', auto_tags if auto_tags else ['Unclassified'])
+            annotations.setdefault('insurance_type', 'General')
+            annotations.setdefault('decision', 'Pending')
+            annotations.setdefault('premium_estimate', 'TBD')
+            annotations.setdefault('retention', 'TBD')
+            annotations.setdefault('risk_level', 'Medium')
+            annotations.setdefault('case_summary', 'Underwriting case requires review')
+            annotations.setdefault('key_insights', ['Comprehensive analysis needed'])
+            annotations.setdefault('confidence', 0.7)
+            
+            return annotations
+            
+        except json.JSONDecodeError:
+            return {
+                'tags': auto_tags if auto_tags else ['Unclassified'],
+                'insurance_type': 'General',
+                'decision': 'Pending',
+                'premium_estimate': 'TBD',
+                'retention': 'TBD',
+                'risk_level': 'Medium',
+                'case_summary': 'Auto-annotation failed, manual review required',
+                'key_insights': ['Requires manual analysis'],
+                'confidence': 0.3
+            }
+            
+    except Exception as e:
+        st.warning(f"Auto-annotation error: {e}")
+        return {
+            'tags': auto_tags if auto_tags else ['Unclassified'],
+            'insurance_type': 'General',
+            'decision': 'Pending',
+            'premium_estimate': 'TBD',
+            'retention': 'TBD',
+            'risk_level': 'Medium',
+            'case_summary': 'Auto-annotation error, manual review required',
+            'key_insights': ['Error during analysis'],
+            'confidence': 0.0
+        }
+
+# ===========================
+# Workspace Management
+# ===========================
+
+def create_workspace(name: str, description: str = ""):
+    """Create a new workspace"""
+    workspace_dir = WORKSPACES_DIR / name
+    workspace_dir.mkdir(exist_ok=True)
+    
+    metadata = {
+        "name": name,
+        "description": description,
+        "created_at": datetime.now().isoformat(),
+        "documents": []
+    }
+    
+    with open(workspace_dir / "metadata.json", 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    log_audit_event("workspace_created", {"workspace": name})
+    
+    return metadata
+
+def load_workspace(name: str) -> Optional[Dict]:
+    """Load workspace metadata"""
+    workspace_dir = WORKSPACES_DIR / name
+    metadata_file = workspace_dir / "metadata.json"
+    
+    if metadata_file.exists():
+        with open(metadata_file, 'r') as f:
+            return json.load(f)
+    return None
+
+def list_workspaces() -> List[str]:
+    """List all workspaces"""
+    if not WORKSPACES_DIR.exists():
         return []
-    return [d for d in os.listdir(WORKSPACES_DIR) if os.path.isdir(os.path.join(WORKSPACES_DIR, d))]
+    return [d.name for d in WORKSPACES_DIR.iterdir() if d.is_dir()]
 
-def create_workspace(name: str) -> Workspace:
-    return Workspace(name)
-
-# ============================================================================
-# CHAT FUNCTION
-# ============================================================================
-
-def generate_cot_response(query: str, retrieved_docs: List[Dict[str, Any]]) -> str:
-    if not retrieved_docs:
-        return "⚠️ **No Relevant Cases Found**\n\nPlease add documents to this workspace or try a different query."
-    
-    docs_text = ""
-    for doc in retrieved_docs:
-        equipment = ", ".join(doc["tags"].get("equipment", []))
-        industry = ", ".join(doc["tags"].get("industry", []))
-        timeline = ", ".join(doc["tags"].get("timeline", []))
-        docs_text += f"""
-{'='*70}
-DOCUMENT #{doc["doc_id"]}
-{'='*70}
-File: {doc["filename"]} ({doc["file_format"].upper()})
-Tags: 🔧 {equipment} | 🏭 {industry} | 📅 {timeline}
-
-Decision: {doc["decision"]}
-Premium: ${doc["premium"]:,}
-Risk Level: {doc["risk_level"]}
-
-Case Summary:
-{doc["case_summary"]}
-
-Key Insights:
-{doc["key_insights"]}
-
-"""
-    
-    messages = [
-        {"role":"system","content":SYSTEM_INSTRUCTION},
-        {"role":"user","content":f"""Query: "{query}"
-
-Retrieved Cases:
-{docs_text}
-
-Please analyze using the 5-step CoT framework:
-1. Extract key tags from query
-2. Analyze retrieved precedents
-3. Check recency & applicability
-4. Identify decision patterns
-5. Recommend with rationale
-
-Provide: Decision + Premium Range + Sources"""}
-    ]
-    return call_deepseek_api(messages)
-
-# ============================================================================
-# UI STYLING
-# ============================================================================
-
-def inject_css(appearance: str):
-    if appearance == "Dark":
-        css = """
-        <style>
-        :root {
-            --text-primary: #e5e7eb; --text-secondary: #cbd5e1; --muted: #9ca3af;
-            --bg-app: #0b1220; --card-bg: #101826; --shadow: 0 1px 3px rgba(0,0,0,0.5);
-            --brand: #93c5fd; --green: #86efac; --amber: #fde68a;
+def upload_document_to_workspace(workspace_name: str, uploaded_file, auto_analyze: bool = True):
+    """Upload document to workspace with auto-analysis"""
+    try:
+        workspace_dir = WORKSPACES_DIR / workspace_name
+        file_path = workspace_dir / uploaded_file.name
+        
+        # Save file
+        with open(file_path, 'wb') as f:
+            f.write(uploaded_file.getvalue())
+        
+        # Extract text
+        extracted_text = extract_text_from_file(file_path)
+        
+        if not extracted_text:
+            st.warning(f"No text extracted from {uploaded_file.name}")
+            return None
+        
+        # Extract images (for handwriting)
+        images = []
+        if file_path.suffix.lower() in ['.docx', '.doc']:
+            images = extract_images_from_docx(file_path)
+        
+        # Generate embedding
+        embedding = generate_embedding(extracted_text[:2000])
+        
+        # Auto-annotate
+        annotations = {}
+        if auto_analyze:
+            annotations = auto_annotate_by_llm(uploaded_file.name, extracted_text)
+        
+        # Create document metadata
+        doc_metadata = {
+            "filename": uploaded_file.name,
+            "format": file_path.suffix.lstrip('.'),
+            "path": str(file_path),
+            "size": uploaded_file.size,
+            "upload_date": datetime.now().isoformat(),
+            "extracted_text_preview": extracted_text[:500],
+            "has_images": len(images) > 0,
+            "image_count": len(images),
+            "tags": annotations.get('tags', []),
+            "insurance_type": annotations.get('insurance_type', ''),
+            "decision": annotations.get('decision', 'Pending'),
+            "risk_level": annotations.get('risk_level', 'Medium'),
+            "has_deep_analysis": False
         }
-        .stApp { background-color: var(--bg-app); color: var(--text-primary); }
-        .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
-        .sub-header { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .workspace-card { background: var(--card-bg); padding: 1.0rem; border-radius: 0.5rem; box-shadow: var(--shadow); color: var(--text-primary); }
-        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color:#0b1220; }
-        .tag-equipment { background-color: #93c5fd; }
-        .tag-industry { background-color: #86efac; }
-        .tag-timeline { background-color: #fde68a; }
-        .analysis-badge { background-color: #c084fc; color:#0b1220; padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
-        .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
-        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
-        #MainMenu, footer, header {visibility: hidden;}
-        </style>
-        """
-    else:
-        css = """
-        <style>
-        :root {
-            --text-primary: #0f172a; --text-secondary: #374151; --muted: #6b7280;
-            --bg-app: #f5f7fa; --card-bg: #ffffff; --shadow: 0 1px 3px rgba(0,0,0,0.1);
-            --brand: #1e40af; --green: #166534; --amber: #92400e;
-        }
-        .stApp { background-color: var(--bg-app); color: var(--text-primary); }
-        .main-header { font-size: 2rem; font-weight: 800; color: var(--text-primary); margin-bottom: 0.25rem; }
-        .sub-header { font-size: 1rem; color: var(--muted); margin-bottom: 1.0rem; }
-        .workspace-card { background: var(--card-bg); padding: 1.0rem; border-radius: 0.5rem; box-shadow: var(--shadow); color: var(--text-primary); }
-        .tag-badge { display:inline-block; padding:0.25rem 0.75rem; margin:0.25rem 0.4rem 0.25rem 0; border-radius:1rem; font-size:0.875rem; font-weight:700; color: var(--text-primary); }
-        .tag-equipment { background-color: #dbeafe; }
-        .tag-industry { background-color: #dcfce7; }
-        .tag-timeline { background-color: #fef3c7; }
-        .analysis-badge { background-color: #e9d5ff; color: var(--text-primary); padding:0.25rem 0.75rem; border-radius:1rem; font-size:0.875rem; font-weight:700; }
-        .stChatMessage, .stMarkdown, p, li, label, span, div { color: var(--text-primary); }
-        [data-testid="stMetricDelta"], [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { color: var(--text-primary) !important; }
-        #MainMenu, footer, header {visibility: hidden;}
-        </style>
-        """
-    st.markdown(css, unsafe_allow_html=True)
+        
+        # Update workspace metadata
+        metadata = load_workspace(workspace_name)
+        metadata["documents"].append(doc_metadata)
+        
+        with open(workspace_dir / "metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Save embedding
+        embedding_file = EMBEDDINGS_DIR / f"{workspace_name}_{uploaded_file.name}.json"
+        with open(embedding_file, 'w') as f:
+            json.dump({"embedding": embedding, "text_preview": extracted_text[:500]}, f)
+        
+        # Perform deep analysis if requested
+        if auto_analyze and len(images) > 0:
+            with st.spinner("Performing dual-track analysis..."):
+                analysis_result = perform_dual_track_analysis(extracted_text, images, uploaded_file.name)
+                
+                # Save analysis
+                analysis_file = ANALYSIS_DIR / f"{workspace_name}_{uploaded_file.name}.json"
+                with open(analysis_file, 'w') as f:
+                    json.dump(analysis_result, f, indent=2)
+                
+                doc_metadata["has_deep_analysis"] = True
+                
+                # Add handwriting to review queue if needed
+                handwriting_data = analysis_result.get('handwriting_translation', {})
+                needs_review = handwriting_data.get('needs_human_review', [])
+                
+                if needs_review:
+                    for img_id in needs_review:
+                        review_item = {
+                            "document": uploaded_file.name,
+                            "workspace": workspace_name,
+                            "image_id": img_id,
+                            "added_date": datetime.now().isoformat(),
+                            "status": "pending",
+                            "confidence": 0.5
+                        }
+                        
+                        review_file = REVIEW_DIR / f"{workspace_name}_{uploaded_file.name}_{img_id}.json"
+                        with open(review_file, 'w') as f:
+                            json.dump(review_item, f, indent=2)
+        
+        log_audit_event("document_uploaded", {
+            "workspace": workspace_name,
+            "filename": uploaded_file.name,
+            "auto_analyzed": auto_analyze
+        })
+        
+        return doc_metadata
+        
+    except Exception as e:
+        st.error(f"Upload error: {e}")
+        traceback.print_exc()
+        return None
 
-# ============================================================================
-# MAIN APPLICATION
-# ============================================================================
+def load_initial_dataset():
+    """Load the initial dataset file on first run"""
+    try:
+        if not Path(INITIAL_DATASET).exists():
+            st.warning(f"Initial dataset file '{INITIAL_DATASET}' not found in root directory")
+            return False
+        
+        # Check if already loaded
+        default_workspace = "Default"
+        metadata = load_workspace(default_workspace)
+        
+        if metadata:
+            for doc in metadata.get("documents", []):
+                if doc["filename"] == INITIAL_DATASET:
+                    return True
+        
+        # Create default workspace if it doesn't exist
+        if not metadata:
+            create_workspace(default_workspace, "Default workspace with initial dataset")
+        
+        # Load the file
+        with open(INITIAL_DATASET, 'rb') as f:
+            file_content = f.read()
+        
+        class UploadedFile:
+            def __init__(self, name, content):
+                self.name = name
+                self.size = len(content)
+                self._content = content
+            
+            def getvalue(self):
+                return self._content
+        
+        uploaded_file = UploadedFile(INITIAL_DATASET, file_content)
+        
+        result = upload_document_to_workspace(default_workspace, uploaded_file, auto_analyze=True)
+        
+        if result:
+            st.success(f"✅ Initial dataset '{INITIAL_DATASET}' loaded successfully!")
+            return True
+        else:
+            st.error(f"Failed to load initial dataset")
+            return False
+            
+    except Exception as e:
+        st.error(f"Error loading initial dataset: {e}")
+        traceback.print_exc()
+        return False
+
+# ===========================
+# Search and Retrieval
+# ===========================
+
+def search_documents(query: str, workspace_name: str, top_k: int = 5) -> List[Dict]:
+    """Search documents using semantic similarity"""
+    try:
+        query_embedding = generate_embedding(query)
+        results = []
+        
+        workspace_metadata = load_workspace(workspace_name)
+        if not workspace_metadata:
+            return []
+        
+        for doc in workspace_metadata.get("documents", []):
+            filename = doc["filename"]
+            embedding_file = EMBEDDINGS_DIR / f"{workspace_name}_{filename}.json"
+            
+            if embedding_file.exists():
+                with open(embedding_file, 'r') as f:
+                    data = json.load(f)
+                    doc_embedding = data["embedding"]
+                    
+                    similarity = cosine_similarity(query_embedding, doc_embedding)
+                    
+                    # Boost score for insurance terms
+                    query_lower = query.lower()
+                    for term in INSURANCE_TERMS.keys():
+                        if term in query_lower and term in data.get("text_preview", "").lower():
+                            similarity += 0.1
+                    
+                    results.append({
+                        "document": doc,
+                        "similarity": similarity,
+                        "preview": data.get("text_preview", "")
+                    })
+        
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        
+        return results[:top_k]
+        
+    except Exception as e:
+        st.error(f"Search error: {e}")
+        return []
+
+# ===========================
+# UI Functions
+# ===========================
+
+def inject_css():
+    """Inject custom CSS"""
+    
+    dark_css = """
+    <style>
+    .stApp {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    }
+    
+    .main-header {
+        background: linear-gradient(90deg, #1e40af 0%, #7c3aed 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+    
+    .main-header h1 {
+        color: #ffffff;
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin: 0;
+    }
+    
+    .main-header p {
+        color: #e0e7ff;
+        font-size: 1.1rem;
+        margin-top: 0.5rem;
+    }
+    
+    .tag-badge {
+        display: inline-block;
+        padding: 0.4rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin: 0.2rem;
+        background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+        color: white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    
+    .analysis-badge {
+        background: linear-gradient(135deg, #10b981, #059669);
+    }
+    
+    .review-pending {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+    }
+    
+    .review-completed {
+        background: linear-gradient(135deg, #10b981, #059669);
+    }
+    
+    .confidence-clear {
+        background: linear-gradient(135deg, #10b981, #059669);
+    }
+    
+    .confidence-standard {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+    }
+    
+    .confidence-cursive {
+        background: linear-gradient(135deg, #ef4444, #dc2626);
+    }
+    
+    .doc-card {
+        background: rgba(30, 41, 59, 0.8);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        margin-bottom: 1rem;
+        transition: all 0.3s ease;
+    }
+    
+    .doc-card:hover {
+        border-color: #3b82f6;
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        transform: translateY(-2px);
+    }
+    
+    .review-card {
+        background: rgba(30, 41, 59, 0.9);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border-left: 4px solid #dc2626;
+        margin-bottom: 1.5rem;
+    }
+    
+    .stChatMessage {
+        background: rgba(30, 41, 59, 0.6);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    }
+    
+    .stMetric {
+        background: rgba(30, 41, 59, 0.6);
+        padding: 1rem;
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+    
+    .api-warning {
+        background: rgba(239, 68, 68, 0.1);
+        border: 1px solid #ef4444;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    </style>
+    """
+    
+    st.markdown(dark_css, unsafe_allow_html=True)
+
+def render_header():
+    """Render application header"""
+    st.markdown(f"""
+    <div class="main-header">
+        <h1>📋 {APP_TITLE}</h1>
+        <p>Version {VERSION} | Powered by AI | Handwriting Translation & Dual-Track Analysis</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_api_config_sidebar():
+    """Render API configuration in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("⚙️ API Configuration")
+        
+        current_key = get_api_key()
+        
+        with st.expander("🔑 Configure AI Model API", expanded=not current_key):
+            api_key_input = st.text_input(
+                "API Key:",
+                value=current_key,
+                type="password",
+                help="Enter your API key for AI model access"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("💾 Save", use_container_width=True):
+                    if api_key_input:
+                        save_api_config(api_key_input)
+                        st.session_state.api_key = api_key_input
+                        st.success("✅ API key saved!")
+                        st.rerun()
+                    else:
+                        st.warning("Please enter an API key")
+            
+            with col2:
+                if st.button("🧪 Test", use_container_width=True):
+                    if api_key_input:
+                        with st.spinner("Testing API key..."):
+                            is_valid, message = validate_api_key(api_key_input)
+                            
+                            if is_valid:
+                                st.success(f"✅ {message}")
+                            else:
+                                st.error(f"❌ {message}")
+                    else:
+                        st.warning("Please enter an API key")
+
+def render_document_card(doc: Dict, workspace_name: str):
+    """Render a document card"""
+    format_icon = SUPPORTED_FORMATS.get(doc['format'], '📄')
+    
+    tags_html = " ".join([f'<span class="tag-badge">{tag}</span>' for tag in doc.get('tags', [])])
+    
+    analysis_badge = ""
+    if doc.get('has_deep_analysis'):
+        analysis_badge = '<span class="tag-badge analysis-badge">✓ Analyzed</span>'
+    
+    st.markdown(f"""
+    <div class="doc-card">
+        <h3>{format_icon} {doc['filename']}</h3>
+        <p><strong>Risk Level:</strong> {doc.get('risk_level', 'N/A')} | 
+           <strong>Decision:</strong> {doc.get('decision', 'Pending')}</p>
+        <p>{tags_html} {analysis_badge}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button(f"📄 View", key=f"view_{doc['filename']}"):
+            st.session_state.viewing_doc = doc
+    
+    with col2:
+        if doc.get('has_deep_analysis'):
+            if st.button(f"📊 Analysis", key=f"analysis_{doc['filename']}"):
+                st.session_state.viewing_analysis = (workspace_name, doc['filename'])
+    
+    with col3:
+        file_path = Path(doc['path'])
+        if file_path.exists():
+            with open(file_path, 'rb') as f:
+                st.download_button(
+                    label="⬇️ Download",
+                    data=f.read(),
+                    file_name=doc['filename'],
+                    key=f"download_{doc['filename']}"
+                )
+
+def render_analysis_view(workspace_name: str, filename: str):
+    """Render analysis results with debug info"""
+    analysis_file = ANALYSIS_DIR / f"{workspace_name}_{filename}.json"
+    
+    if not analysis_file.exists():
+        st.warning("No analysis found for this document")
+        return
+    
+    with open(analysis_file, 'r') as f:
+        analysis = json.load(f)
+    
+    st.subheader("📊 Comprehensive Analysis Results")
+    
+    # Show API status
+    api_key = get_api_key()
+    if not api_key:
+        st.error("⚠️ API key not configured. Analysis may be incomplete.")
+        st.info("Please configure an API key in the sidebar (⚙️ API Configuration)")
+    
+    view_mode = st.radio(
+        "Select View:",
+        ["Integrated Report", "Electronic Text", "Handwriting Translation", "Q&A Pairs"],
+        horizontal=True
+    )
+    
+    if view_mode == "Integrated Report":
+        st.markdown("### 📝 Integrated Analysis Report")
+        
+        report = analysis.get('integrated_report', '')
+        
+        # Check if report is empty or error message
+        if not report or report == "{}" or "API" in report or "failed" in report.lower():
+            st.error("❌ Analysis generation failed or incomplete")
+            st.markdown("""
+            **Possible reasons:**
+            1. API key is not configured
+            2. API connection failed
+            3. API quota exceeded
+            
+            **How to fix:**
+            1. Configure API key in the sidebar (⚙️ API Configuration)
+            2. Click "🧪 Test" to verify the connection
+            3. Click "🔄 Re-run Analysis" below
+            """)
+            
+            # Show raw data for debugging
+            with st.expander("🔍 Debug Information"):
+                st.json(analysis)
+        else:
+            st.markdown(report)
+        
+    elif view_mode == "Electronic Text":
+        st.markdown("### 📄 Electronic Text Analysis")
+        electronic = analysis.get('electronic_analysis', {})
+        
+        if not electronic or len(electronic) == 0:
+            st.warning("⚠️ Electronic text analysis is empty. API may have failed.")
+            with st.expander("🔍 View Raw Data"):
+                st.json(analysis)
+        else:
+            with st.expander("Policy Details", expanded=True):
+                st.json(electronic.get('policy_details', {}))
+            
+            with st.expander("Risk Assessment"):
+                st.json(electronic.get('risk_assessment', {}))
+            
+            with st.expander("Coverage Terms"):
+                st.json(electronic.get('coverage_terms', {}))
+    
+    elif view_mode == "Handwriting Translation":
+        st.markdown("### ✍️ Handwriting Translation Results")
+        handwriting = analysis.get('handwriting_translation', {})
+        
+        st.markdown(f"**Summary:** {handwriting.get('handwriting_summary', 'N/A')}")
+        
+        st.markdown("#### Translated Annotations:")
+        annotations = handwriting.get('translated_annotations', [])
+        
+        if not annotations:
+            st.info("No handwritten content detected in this document")
+        else:
+            for annotation in annotations:
+                tier = annotation['confidence_tier']
+                confidence = annotation['confidence_score']
+                
+                tier_class = f"confidence-{tier.lower()}"
+                
+                st.markdown(f"""
+                <div class="review-card">
+                    <p><strong>Location:</strong> {annotation['location']}</p>
+                    <p><strong>Confidence:</strong> <span class="tag-badge {tier_class}">{tier} ({confidence:.2f})</span></p>
+                    <p><strong>Translated Text:</strong> {annotation['translated_text']}</p>
+                    <p><strong>Context:</strong> {annotation.get('context', 'N/A')}</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        if handwriting.get('key_insights_from_handwriting'):
+            st.markdown("#### Key Insights from Handwriting:")
+            for insight in handwriting['key_insights_from_handwriting']:
+                st.markdown(f"- {insight}")
+    
+    elif view_mode == "Q&A Pairs":
+        st.markdown("### ❓ Question & Answer Pairs")
+        qa_data = analysis.get('qa_extraction', {})
+        
+        pairs = qa_data.get('qa_pairs', [])
+        
+        if not pairs:
+            st.info("No Q&A pairs found in this document")
+        else:
+            for qa in pairs:
+                with st.expander(f"Q: {qa.get('question', 'N/A')}"):
+                    st.markdown(f"**Answer:** {qa.get('answer', 'N/A')}")
+                    st.markdown(f"**Source:** {qa.get('source', 'N/A')}")
+                    st.markdown(f"**Category:** {qa.get('category', 'N/A')}")
+    
+    # Add reanalysis button
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔄 Re-run Analysis"):
+            with st.spinner("Re-analyzing document..."):
+                # Load document
+                metadata = load_workspace(workspace_name)
+                doc = next((d for d in metadata['documents'] if d['filename'] == filename), None)
+                
+                if doc:
+                    file_path = Path(doc['path'])
+                    text = extract_text_from_file(file_path)
+                    images = []
+                    
+                    if file_path.suffix.lower() in ['.docx', '.doc']:
+                        images = extract_images_from_docx(file_path)
+                    
+                    # Perform analysis
+                    new_analysis = perform_dual_track_analysis(text, images, filename)
+                    
+                    # Save results
+                    with open(analysis_file, 'w') as f:
+                        json.dump(new_analysis, f, indent=2)
+                    
+                    st.success("✅ Analysis complete! Refreshing...")
+                    st.rerun()
+    
+    with col2:
+        if st.button("🔍 View Full JSON"):
+            st.json(analysis)
+
+# ===========================
+# Main Application
+# ===========================
 
 def main():
     st.set_page_config(
-        page_title="Underwriting Assistant - Enhanced",
-        page_icon="🤖",
+        page_title="Enhanced Underwriting Assistant",
+        page_icon="📋",
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
+    inject_css()
+    ensure_dirs()
+    
+    # Initialize session state
+    if 'current_workspace' not in st.session_state:
+        st.session_state.current_workspace = "Default"
+    
+    if 'viewing_doc' not in st.session_state:
+        st.session_state.viewing_doc = None
+    
+    if 'viewing_analysis' not in st.session_state:
+        st.session_state.viewing_analysis = None
+    
+    if 'initial_load_done' not in st.session_state:
+        st.session_state.initial_load_done = False
+    
+    if 'current_review_index' not in st.session_state:
+        st.session_state.current_review_index = 0
+    
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = get_api_key()
+    
+    render_header()
+    
+    # Load initial dataset
+    if not st.session_state.initial_load_done:
+        with st.spinner("Loading initial dataset..."):
+            load_initial_dataset()
+        st.session_state.initial_load_done = True
+    
     # Sidebar
     with st.sidebar:
-        st.markdown("### 🎨 Appearance")
-        appearance = st.radio("Theme", ["Light", "Dark"], horizontal=True, key="appearance_choice")
-    
-    inject_css(appearance)
-    
-    # Header
-    st.markdown('<div class="main-header">🤖 Underwriting Assistant (Enhanced)</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">RAG + CoT | Deep Document Analysis | Multimodal Extraction</div>', unsafe_allow_html=True)
-    
-    # Workspace Management
-    with st.sidebar:
-        st.markdown("### 📁 Workspaces")
-        workspaces = get_all_workspaces()
+        st.header("🗂️ Workspace Management")
         
-        with st.expander("➕ New Workspace"):
-            new_ws_name = st.text_input("Workspace Name", placeholder="e.g., Gas Turbine Cases")
-            if st.button("Create"):
-                if new_ws_name and new_ws_name not in workspaces:
-                    create_workspace(new_ws_name)
-                    st.success(f"✅ Created workspace: {new_ws_name}")
-                    st.rerun()
-                elif new_ws_name in workspaces:
-                    st.error("Workspace already exists")
-                else:
-                    st.error("Please enter a name")
+        workspaces = list_workspaces()
         
         if not workspaces:
-            st.info("No workspaces yet. Create one above.")
-            st.stop()
-        
-        selected_ws = st.selectbox("Select Workspace", workspaces, key="workspace_selector")
-        workspace = Workspace(selected_ws)
-        stats = workspace.get_stats()
-        
-        st.markdown("---")
-        st.markdown("### 📊 Workspace Stats")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Documents", stats["total_documents"])
-        with c2:
-            st.metric("Size", f"{stats['total_size_mb']:.1f} MB")
-        st.metric("Deep Analyzed", f"{stats.get('analyzed_documents', 0)}")
-        
-        if stats["format_distribution"]:
-            st.markdown("**Formats:**")
-            for fmt, count in stats["format_distribution"].items():
-                st.write(f"{SUPPORTED_FORMATS.get(fmt, fmt)}: {count}")
-        
-        st.markdown("---")
-        st.markdown("### ⚙️ Settings")
-        if st.button("🗑️ Delete Workspace"):
-            if st.checkbox(f"Confirm delete {selected_ws}"):
-                import shutil
-                shutil.rmtree(workspace.workspace_dir)
-                st.success("Workspace deleted!")
+            st.info("No workspaces found. Create one to get started.")
+        else:
+            selected_workspace = st.selectbox(
+                "Select Workspace:",
+                workspaces,
+                index=workspaces.index(st.session_state.current_workspace) if st.session_state.current_workspace in workspaces else 0
+            )
+            
+            if selected_workspace != st.session_state.current_workspace:
+                st.session_state.current_workspace = selected_workspace
                 st.rerun()
+        
+        st.markdown("---")
+        
+        with st.expander("➕ Create New Workspace"):
+            new_workspace_name = st.text_input("Workspace Name:")
+            new_workspace_desc = st.text_area("Description:")
+            
+            if st.button("Create Workspace"):
+                if new_workspace_name:
+                    create_workspace(new_workspace_name, new_workspace_desc)
+                    st.success(f"Workspace '{new_workspace_name}' created!")
+                    st.session_state.current_workspace = new_workspace_name
+                    st.rerun()
+                else:
+                    st.warning("Please enter a workspace name")
+        
+        st.markdown("---")
+        
+        if st.session_state.current_workspace:
+            metadata = load_workspace(st.session_state.current_workspace)
+            if metadata:
+                st.info(f"📁 **{metadata['name']}**\n\n{metadata.get('description', 'No description')}")
+                st.metric("Documents", len(metadata.get('documents', [])))
+        
+        render_api_config_sidebar()
     
-    # Main Tabs - THIS IS THE KEY CHANGE: 4 tabs instead of 3
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "💬 Chat",
-        "📄 Documents",
-        "📤 Upload (Auto-Tag)",
-        "🔬 Deep Analysis"  # NEW TAB
+    # Main tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "💬 Chat Assistant",
+        "📚 Document Library",
+        "⬆️ Upload Documents",
+        "📊 Analysis Dashboard",
+        "✍️ Handwriting Review"
     ])
     
-    # TAB 1: Chat
+    # TAB 1: Chat Assistant
     with tab1:
-        st.markdown("### 💬 Chat with AI Assistant")
-        if stats["total_documents"] == 0:
-            st.warning("⚠️ No documents yet. Upload in 'Upload (Auto-Tag)'.")
+        st.header("💬 AI Underwriting Assistant")
+        st.markdown("Ask questions about your documents, policies, and underwriting decisions.")
         
-        if "messages" not in st.session_state:
+        if 'messages' not in st.session_state:
             st.session_state.messages = []
         
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
         
-        if prompt := st.chat_input("Ask about underwriting cases..."):
+        if prompt := st.chat_input("Ask about underwriting, policies, risk assessment..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
+            
             with st.chat_message("user"):
                 st.markdown(prompt)
             
             with st.chat_message("assistant"):
-                with st.spinner("🔍 Searching knowledge base..."):
-                    retrieved = workspace.search_documents(prompt, top_k=3)
-                    resp = generate_cot_response(prompt, retrieved)
-                    st.markdown(resp)
-                    
-                    if retrieved:
-                        with st.expander(f"📚 {len(retrieved)} Retrieved Documents"):
-                            for d in retrieved:
-                                st.markdown(f"**{d['doc_id']}** - {d['filename']}")
-                                tags_html = ""
-                                for t in d["tags"].get("equipment", []):
-                                    tags_html += f'<span class="tag-badge tag-equipment">🔧 {t}</span>'
-                                for t in d["tags"].get("industry", []):
-                                    tags_html += f'<span class="tag-badge tag-industry">🏭 {t}</span>'
-                                for t in d["tags"].get("timeline", []):
-                                    tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
-                                if d.get("has_deep_analysis"):
-                                    tags_html += '<span class="analysis-badge">📊 Deep Analyzed</span>'
-                                st.markdown(tags_html, unsafe_allow_html=True)
-                                st.markdown("---")
-            
-            st.session_state.messages.append({"role": "assistant", "content": resp})
-    
-    # TAB 2: Documents
-    with tab2:
-        st.markdown("### 📄 Knowledge Base")
-        if not workspace.metadata:
-            st.info("No documents yet. Upload in 'Upload (Auto-Tag)'.")
-        else:
-            left, right = st.columns([1, 2.2])
-            
-            with left:
-                st.markdown("#### 📚 Knowledge Base Browser")
-                q = st.text_input("Search title/tags...", key="kb_search")
-                fe = st.multiselect("🔧 Equipment", TAG_OPTIONS["equipment"])
-                fi = st.multiselect("🏭 Industry", TAG_OPTIONS["industry"])
-                ft = st.multiselect("📅 Timeline", TAG_OPTIONS["timeline"])
-                show_analyzed = st.checkbox("Show only analyzed docs", value=False)
-                
-                docs = workspace.metadata
-                if q:
-                    ql = q.lower()
-                    docs = [d for d in docs if (ql in d["filename"].lower() or 
-                           any(ql in tag.lower() for v in d["tags"].values() for tag in v))]
-                if fe:
-                    docs = [d for d in docs if any(t in d["tags"].get("equipment", []) for t in fe)]
-                if fi:
-                    docs = [d for d in docs if any(t in d["tags"].get("industry", []) for t in fi)]
-                if ft:
-                    docs = [d for d in docs if any(t in d["tags"].get("timeline", []) for t in ft)]
-                if show_analyzed:
-                    docs = [d for d in docs if d.get("has_deep_analysis", False)]
-                
-                docs = sorted(docs, key=lambda d: d.get("upload_date", ""), reverse=True)
-                
-                options = {f"{SUPPORTED_FORMATS.get(d['file_format'],'📎')} {d['filename']} [{d['doc_id']}]": d["doc_id"] 
-                          for d in docs}
-                selected_id = st.radio("Documents", list(options.keys()), 
-                                     index=0 if options else None, key="kb_selected")
-                selected_doc = None
-                if selected_id:
-                    sel_id = options[selected_id]
-                    selected_doc = next((d for d in docs if d["doc_id"] == sel_id), None)
-                
-                if selected_doc and st.button("🗑️ Delete Selected"):
-                    workspace.delete_document(selected_doc["doc_id"])
-                    st.success("Document deleted!")
-                    st.rerun()
-            
-            with right:
-                st.markdown("#### 👀 Preview Original")
-                if not selected_doc:
-                    st.info("Select a document on the left to preview.")
-                else:
-                    doc = selected_doc
-                    st.markdown(f"**{doc['filename']}**  \nID: `{doc['doc_id']}` | "
-                              f"Format: **{doc['file_format'].upper()}** | Size: {doc['file_size_kb']:.1f} KB")
-                    
-                    if doc.get("has_deep_analysis"):
-                        st.success("✅ This document has been deeply analyzed!")
-                    
-                    with open(doc["file_path"], "rb") as f:
-                        st.download_button("⬇️ Download file", f, file_name=doc["filename"], mime=None)
-                    
-                    ext = doc["file_format"]
-                    path = doc["file_path"]
-                    
-                    if ext == "pdf":
-                        try:
-                            data_uri = file_to_data_uri(path, "application/pdf")
-                            html = f'<iframe src="{data_uri}" width="100%" height="800px" style="border:none;"></iframe>'
-                            st.components.v1.html(html, height=820, scrolling=True)
-                        except Exception as e:
-                            st.error(f"PDF preview failed: {e}")
-                    elif ext in ["png", "jpg", "jpeg"]:
-                        try:
-                            st.image(path, use_column_width=True)
-                        except Exception as e:
-                            st.error(f"Image preview failed: {e}")
-                    elif ext in ["docx", "doc"]:
-                        text = extract_text_from_docx(path) if ext == "docx" else "(DOC preview not supported)"
-                        st.text_area("Extracted Text (preview)", value=text[:8000], height=400)
-                    elif ext == "txt":
-                        text = extract_text_from_txt(path)
-                        st.text_area("Text File (preview)", value=text[:8000], height=400)
-                    elif ext in ["xlsx", "xls"]:
-                        try:
-                            df = pd.read_excel(path)
-                            st.dataframe(df.head(200), use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Excel preview failed: {e}")
-                    else:
-                        st.info("Preview not supported for this file type. Please download to view.")
-                    
-                    st.markdown("---")
-                    st.markdown("**Auto Tags & Case Info**")
-                    tags_html = ""
-                    for t in doc["tags"].get("equipment", []):
-                        tags_html += f'<span class="tag-badge tag-equipment">🔧 {t}</span>'
-                    for t in doc["tags"].get("industry", []):
-                        tags_html += f'<span class="tag-badge tag-industry">🏭 {t}</span>'
-                    for t in doc["tags"].get("timeline", []):
-                        tags_html += f'<span class="tag-badge tag-timeline">📅 {t}</span>'
-                    st.markdown(tags_html, unsafe_allow_html=True)
-                    
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.write(f"**Decision:** {doc['decision']}")
-                    with c2:
-                        st.write(f"**Premium:** ${doc['premium']:,}")
-                    with c3:
-                        st.write(f"**Risk:** {doc['risk_level']}")
-                    st.write("**Case Summary:**")
-                    st.info(doc["case_summary"])
-                    st.write("**Key Insights:**")
-                    st.write(doc["key_insights"])
-    
-    # TAB 3: Upload
-    with tab3:
-        st.markdown("### 📤 Upload Document (Auto-Tag by Model)")
-        st.caption("Upload files and the system will automatically extract text and perform auto-tagging.")
-        
-        with st.form("upload_form_autotag"):
-            uploaded_file = st.file_uploader(
-                "Choose a document",
-                type=list(SUPPORTED_FORMATS.keys()),
-                help="Supported: PDF, Word, Excel, Text, Images"
-            )
-            submitted = st.form_submit_button("📤 Upload & Auto-Tag")
-        
-        if submitted:
-            if not uploaded_file:
-                st.error("Please upload a document")
-            else:
-                with st.spinner("Processing document & auto-tagging..."):
-                    temp_id = f"TEMP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(uploaded_file.name.encode()).hexdigest()[:6].upper()}"
-                    ext = uploaded_file.name.split('.')[-1].lower()
-                    temp_path = os.path.join(Workspace(selected_ws).documents_dir, f"{temp_id}.{ext}")
-                    
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    
-                    extracted_text = extract_text_from_file(temp_path, ext)
-                    auto = auto_annotate_by_llm(extracted_text, uploaded_file.name)
-                    
-                    doc = workspace.add_document(
-                        uploaded_file=uploaded_file,
-                        tags=auto["tags"],
-                        case_summary=auto["case_summary"],
-                        key_insights=auto["key_insights"],
-                        decision=auto["decision"],
-                        premium=int(auto.get("premium", 0) or 0),
-                        risk_level=auto["risk_level"],
-                        extracted_text_preview=extracted_text[:800],
-                        has_deep_analysis=False
+                with st.spinner("Analyzing..."):
+                    search_results = search_documents(
+                        prompt,
+                        st.session_state.current_workspace,
+                        top_k=3
                     )
                     
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    except:
-                        pass
+                    context = "\n\n".join([
+                        f"Document: {r['document']['filename']}\n{r['preview']}"
+                        for r in search_results
+                    ])
                     
-                    st.success(f"✅ Document uploaded & auto-tagged: {doc['doc_id']}")
-                    with st.expander("🔎 Auto-Tag Result"):
-                        st.json(auto)
+                    user_prompt = f"""User Question: {prompt}
+
+Relevant Documents:
+{context}
+
+Provide a comprehensive answer based on the available documents."""
+
+                    response = call_llm_api(SYSTEM_INSTRUCTION, user_prompt)
+                    
+                    if response == "{}":
+                        response = "I apologize, but I'm unable to process your request at this time. Please ensure the API key is configured correctly in the sidebar."
+                    
+                    st.markdown(response)
+                    
+                    if search_results:
+                        with st.expander("📚 Sources"):
+                            for r in search_results:
+                                st.markdown(f"- **{r['document']['filename']}** (similarity: {r['similarity']:.2f})")
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": response})
     
-    # TAB 4: Deep Analysis (NEW)
-    with tab4:
-        st.markdown("### 🔬 Deep Document Analysis")
-        st.caption("Use DeepSeek CoT to perform deep analysis on documents, extract electronic text and handwritten annotations, and generate detailed reports.")
+    # TAB 2: Document Library
+    with tab2:
+        st.header("📚 Document Library")
         
-        if not workspace.metadata:
-            st.info("No documents yet. Upload documents first in 'Upload (Auto-Tag)'.")
+        if not st.session_state.current_workspace:
+            st.warning("Please select or create a workspace first")
         else:
-            doc_options = {
-                f"{SUPPORTED_FORMATS.get(d['file_format'],'📎')} {d['filename']} [{d['doc_id']}]": d["doc_id"]
-                for d in workspace.metadata
-            }
+            metadata = load_workspace(st.session_state.current_workspace)
             
-            selected_for_analysis = st.selectbox(
-                "Select a document to analyze:",
-                list(doc_options.keys()),
-                key="deep_analysis_selector"
+            if not metadata or not metadata.get('documents'):
+                st.info("No documents in this workspace. Upload documents to get started.")
+            else:
+                col1, col2 = st.columns([3, 1])
+                
+                with col1:
+                    search_query = st.text_input("🔍 Search documents:", placeholder="Enter keywords...")
+                
+                with col2:
+                    filter_type = st.selectbox("Filter by:", ["All", "PDF", "Word", "Excel", "Images"])
+                
+                documents = metadata.get('documents', [])
+                
+                if filter_type != "All":
+                    filter_map = {
+                        "PDF": "pdf",
+                        "Word": ["docx", "doc"],
+                        "Excel": ["xlsx", "xls"],
+                        "Images": ["png", "jpg", "jpeg"]
+                    }
+                    filter_formats = filter_map[filter_type]
+                    if isinstance(filter_formats, list):
+                        documents = [d for d in documents if d['format'] in filter_formats]
+                    else:
+                        documents = [d for d in documents if d['format'] == filter_formats]
+                
+                if search_query:
+                    documents = [d for d in documents if search_query.lower() in d['filename'].lower()]
+                
+                st.markdown(f"**Showing {len(documents)} document(s)**")
+                
+                for doc in documents:
+                    render_document_card(doc, st.session_state.current_workspace)
+                
+                if st.session_state.viewing_doc:
+                    with st.expander("📄 Document Details", expanded=True):
+                        doc = st.session_state.viewing_doc
+                        st.json(doc)
+                        
+                        if st.button("Close Details"):
+                            st.session_state.viewing_doc = None
+                            st.rerun()
+                
+                if st.session_state.viewing_analysis:
+                    workspace, filename = st.session_state.viewing_analysis
+                    render_analysis_view(workspace, filename)
+                    
+                    if st.button("Close Analysis"):
+                        st.session_state.viewing_analysis = None
+                        st.rerun()
+    
+    # TAB 3: Upload Documents
+    with tab3:
+        st.header("⬆️ Upload Documents")
+        
+        if not st.session_state.current_workspace:
+            st.warning("Please select or create a workspace first")
+        else:
+            st.markdown(f"**Current Workspace:** {st.session_state.current_workspace}")
+            
+            uploaded_files = st.file_uploader(
+                "Upload underwriting documents:",
+                type=list(SUPPORTED_FORMATS.keys()),
+                accept_multiple_files=True,
+                help="Supported formats: PDF, Word, Excel, Text, Images"
             )
             
-            if selected_for_analysis:
-                analysis_doc_id = doc_options[selected_for_analysis]
-                analysis_doc = next((d for d in workspace.metadata if d["doc_id"] == analysis_doc_id), None)
+            auto_analyze = st.checkbox("Perform automatic analysis", value=True,
+                                      help="Includes handwriting translation and dual-track analysis")
+            
+            if uploaded_files and st.button("Upload & Process"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                if analysis_doc:
-                    col1, col2 = st.columns([2, 1])
+                for idx, file in enumerate(uploaded_files):
+                    status_text.text(f"Processing {file.name}...")
                     
-                    with col1:
-                        st.markdown(f"**Selected:** {analysis_doc['filename']}")
-                        st.write(f"Format: {analysis_doc['file_format'].upper()} | Size: {analysis_doc['file_size_kb']:.1f} KB")
+                    result = upload_document_to_workspace(
+                        st.session_state.current_workspace,
+                        file,
+                        auto_analyze=auto_analyze
+                    )
                     
-                    with col2:
-                        if analysis_doc.get("has_deep_analysis"):
-                            st.success("✅ Already analyzed")
-                        else:
-                            st.info("Not yet analyzed")
+                    if result:
+                        st.success(f"✅ {file.name} uploaded successfully!")
+                    else:
+                        st.error(f"❌ Failed to upload {file.name}")
                     
-                    if st.button("🚀 Start Deep Analysis", type="primary"):
-                        with st.container():
-                            analysis_result = perform_deep_document_analysis(
-                                file_path=analysis_doc["file_path"],
-                                file_format=analysis_doc["file_format"],
-                                filename=analysis_doc["filename"],
-                                doc_id=analysis_doc["doc_id"]
-                            )
-                            
-                            for doc in workspace.metadata:
-                                if doc["doc_id"] == analysis_doc_id:
-                                    doc["has_deep_analysis"] = True
-                                    break
-                            workspace._save_metadata()
-                            
-                            st.balloons()
-                            st.success("🎉 Analysis completed! Scroll down to view results.")
+                    progress_bar.progress((idx + 1) / len(uploaded_files))
+                
+                status_text.text("Upload complete!")
+                st.balloons()
+    
+    # TAB 4: Analysis Dashboard
+    with tab4:
+        st.header("📊 Analysis Dashboard")
+        
+        if not st.session_state.current_workspace:
+            st.warning("Please select a workspace first")
+        else:
+            metadata = load_workspace(st.session_state.current_workspace)
+            
+            if not metadata or not metadata.get('documents'):
+                st.info("No documents to analyze")
+            else:
+                documents = metadata.get('documents', [])
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Documents", len(documents))
+                
+                with col2:
+                    analyzed = sum(1 for d in documents if d.get('has_deep_analysis'))
+                    st.metric("Analyzed", analyzed)
+                
+                with col3:
+                    high_risk = sum(1 for d in documents if d.get('risk_level') == 'High')
+                    st.metric("High Risk", high_risk)
+                
+                with col4:
+                    pending = sum(1 for d in documents if d.get('decision') == 'Pending')
+                    st.metric("Pending Review", pending)
+                
+                st.markdown("---")
+                
+                st.subheader("Document Analysis Status")
+                
+                for doc in documents:
+                    with st.expander(f"{doc['filename']} - {doc.get('decision', 'Pending')}"):
+                        col1, col2 = st.columns([2, 1])
+                        
+                        with col1:
+                            st.markdown(f"**Risk Level:** {doc.get('risk_level', 'N/A')}")
+                            st.markdown(f"**Tags:** {', '.join(doc.get('tags', []))}")
+                            st.markdown(f"**Has Images:** {'Yes' if doc.get('has_images') else 'No'}")
+                        
+                        with col2:
+                            if doc.get('has_deep_analysis'):
+                                if st.button("View Full Analysis", key=f"view_full_{doc['filename']}"):
+                                    st.session_state.viewing_analysis = (st.session_state.current_workspace, doc['filename'])
+                                    st.rerun()
+                            else:
+                                if st.button("Run Analysis", key=f"run_{doc['filename']}"):
+                                    with st.spinner("Analyzing..."):
+                                        file_path = Path(doc['path'])
+                                        text = extract_text_from_file(file_path)
+                                        images = []
+                                        
+                                        if file_path.suffix.lower() in ['.docx', '.doc']:
+                                            images = extract_images_from_docx(file_path)
+                                        
+                                        analysis = perform_dual_track_analysis(text, images, doc['filename'])
+                                        
+                                        analysis_file = ANALYSIS_DIR / f"{st.session_state.current_workspace}_{doc['filename']}.json"
+                                        with open(analysis_file, 'w') as f:
+                                            json.dump(analysis, f, indent=2)
+                                        
+                                        doc['has_deep_analysis'] = True
+                                        
+                                        with open(WORKSPACES_DIR / st.session_state.current_workspace / "metadata.json", 'w') as f:
+                                            json.dump(metadata, f, indent=2)
+                                        
+                                        st.success("Analysis complete!")
+                                        st.rerun()
+    
+    # TAB 5: Handwriting Review
+    with tab5:
+        st.header("✍️ Handwriting Review Workbench")
+        st.markdown("Human-in-the-loop verification of handwritten content translation")
+        
+        review_files = list(REVIEW_DIR.glob("*.json"))
+        
+        if not review_files:
+            st.info("✅ No handwritten content requires review at this time")
+        else:
+            col1, col2, col3 = st.columns(3)
+            
+            pending = sum(1 for f in review_files if json.loads(f.read_text()).get('status') == 'pending')
+            completed = len(review_files) - pending
+            
+            with col1:
+                st.metric("Total Items", len(review_files))
+            with col2:
+                st.metric("Pending", pending)
+            with col3:
+                st.metric("Completed", completed)
+            
+            st.markdown("---")
+            
+            if st.session_state.current_review_index >= len(review_files):
+                st.session_state.current_review_index = 0
+            
+            current_idx = st.session_state.current_review_index
+            review_file = review_files[current_idx]
+            review_data = json.loads(review_file.read_text())
+            
+            st.markdown(f"**Review Item {current_idx + 1} of {len(review_files)}**")
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.markdown("### Original Handwriting")
+                st.info(f"**Document:** {review_data['document']}")
+                st.info(f"**Image ID:** {review_data['image_id']}")
+                st.info(f"**Confidence:** {review_data.get('confidence', 0.5):.2f}")
+                
+                st.markdown("*[Original handwriting image would appear here]*")
+            
+            with col2:
+                st.markdown("### Translation / Transcription")
+                
+                analysis_file = ANALYSIS_DIR / f"{review_data['workspace']}_{review_data['document']}.json"
+                
+                matching_ann = None
+                if analysis_file.exists():
+                    analysis = json.loads(analysis_file.read_text())
+                    handwriting = analysis.get('handwriting_translation', {})
                     
-                    st.markdown("---")
+                    for ann in handwriting.get('translated_annotations', []):
+                        if ann['image_id'] == review_data['image_id']:
+                            matching_ann = ann
+                            break
                     
-                    analysis_file = os.path.join(ANALYSIS_DIR, f"{analysis_doc_id}_analysis.json")
-                    if os.path.exists(analysis_file):
-                        st.markdown("### 📊 Analysis Results")
-                        
-                        with open(analysis_file, 'r', encoding='utf-8') as f:
-                            analysis_data = json.load(f)
-                        
-                        st.markdown("#### 📋 Overview")
-                        c1, c2, c3, c4 = st.columns(4)
-                        with c1:
-                            st.metric("Text Length", f"{analysis_data['metadata'].get('text_length', 0):,} chars")
-                        with c2:
-                            st.metric("Images Found", analysis_data['metadata'].get('image_count', 0))
-                        with c3:
-                            st.metric("Has Text", "✅" if analysis_data['metadata'].get('has_text') else "❌")
-                        with c4:
-                            st.metric("Has Images", "✅" if analysis_data['metadata'].get('has_images') else "❌")
-                        
-                        st.markdown("#### 📝 Comprehensive Report")
-                        st.markdown(analysis_data.get("comprehensive_report", "No report generated."))
-                        
-                        with st.expander("📄 Text Analysis Details"):
-                            st.json(analysis_data.get("text_analysis", {}))
-                        
-                        if analysis_data.get("image_analysis"):
-                            with st.expander(f"🖼️ Image Analysis ({len(analysis_data['image_analysis'])} images)"):
-                                for img_analysis in analysis_data["image_analysis"]:
-                                    st.markdown(f"**{img_analysis.get('image_id', 'Unknown')}**")
-                                    st.json(img_analysis)
-                                    st.markdown("---")
-                        
-                        report_json = json.dumps(analysis_data, ensure_ascii=False, indent=2)
-                        st.download_button(
-                            "📥 Download Full Analysis Report (JSON)",
-                            data=report_json,
-                            file_name=f"{analysis_doc_id}_analysis.json",
-                            mime="application/json"
-                        )
+                    if matching_ann:
+                        st.markdown(f"**Auto-translated:** {matching_ann['translated_text']}")
+                        st.markdown(f"**Confidence Tier:** {matching_ann['confidence_tier']}")
+                    else:
+                        st.warning("Translation not found")
+                else:
+                    st.warning("Analysis file not found")
+            
+            st.markdown("---")
+            st.markdown("### Review Actions")
+            
+            form_key = f"review_form_{review_data['document']}_{review_data['image_id']}_{current_idx}"
+            
+            with st.form(key=form_key):
+                transcription = st.text_area(
+                    "Manual Transcription (edit if needed):",
+                    value=matching_ann.get('translated_text', '') if matching_ann else '',
+                    key=f"transcribe_{form_key}",
+                    height=100
+                )
+                
+                notes = st.text_area(
+                    "Reviewer Notes:",
+                    key=f"notes_{form_key}",
+                    height=80
+                )
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    approve_btn = st.form_submit_button("✅ Approve", use_container_width=True)
+                with col2:
+                    modify_btn = st.form_submit_button("✏️ Modify & Approve", use_container_width=True)
+                with col3:
+                    reject_btn = st.form_submit_button("❌ Mark Unreadable", use_container_width=True)
+                
+                if approve_btn or modify_btn or reject_btn:
+                    review_data['status'] = 'completed'
+                    review_data['reviewed_at'] = datetime.now().isoformat()
+                    review_data['final_transcription'] = transcription
+                    review_data['reviewer_notes'] = notes
+                    
+                    if reject_btn:
+                        review_data['readable'] = False
+                    else:
+                        review_data['readable'] = True
+                    
+                    with open(review_file, 'w') as f:
+                        json.dump(review_data, f, indent=2)
+                    
+                    log_audit_event("handwriting_reviewed", {
+                        "document": review_data['document'],
+                        "image_id": review_data['image_id'],
+                        "status": review_data['status']
+                    })
+                    
+                    st.success("✅ Review submitted!")
+                    st.info("Click 'Next Item' to continue reviewing")
+            
+            st.markdown("---")
+            col1, col2, col3 = st.columns([1, 2, 1])
+            
+            with col1:
+                if st.button("⬅️ Previous", disabled=(current_idx == 0)):
+                    st.session_state.current_review_index -= 1
+                    st.rerun()
+            
+            with col2:
+                st.markdown(f"<center>Item {current_idx + 1} / {len(review_files)}</center>", unsafe_allow_html=True)
+            
+            with col3:
+                if st.button("Next ➡️", disabled=(current_idx >= len(review_files) - 1)):
+                    st.session_state.current_review_index += 1
+                    st.rerun()
+            
+            st.markdown("---")
+            if st.button("📥 Export All Reviews"):
+                export_data = []
+                for rf in review_files:
+                    export_data.append(json.loads(rf.read_text()))
+                
+                export_json = json.dumps(export_data, indent=2)
+                st.download_button(
+                    label="Download JSON",
+                    data=export_json,
+                    file_name=f"handwriting_reviews_{datetime.now().strftime('%Y%m%d')}.json",
+                    mime="application/json"
+                )
 
 if __name__ == "__main__":
     main()
