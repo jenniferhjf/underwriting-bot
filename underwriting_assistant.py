@@ -1143,20 +1143,22 @@ def search_documents(query: str, workspace_name: str, top_k: int = 5) -> List[Di
 # ===========================
 
 def inject_css():
-    """Inject custom CSS"""
+    """Inject custom CSS - WHITE THEME"""
     
-    dark_css = """
+    light_css = """
     <style>
+    /* 主背景 - 白色渐变 */
     .stApp {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
     }
     
+    /* 页头 - 保持蓝紫色渐变但调整阴影 */
     .main-header {
-        background: linear-gradient(90deg, #1e40af 0%, #7c3aed 100%);
+        background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%);
         padding: 2rem;
         border-radius: 15px;
         margin-bottom: 2rem;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
     }
     
     .main-header h1 {
@@ -1172,6 +1174,7 @@ def inject_css():
         margin-top: 0.5rem;
     }
     
+    /* 标签徽章 */
     .tag-badge {
         display: inline-block;
         padding: 0.4rem 0.8rem;
@@ -1181,7 +1184,7 @@ def inject_css():
         margin: 0.2rem;
         background: linear-gradient(135deg, #3b82f6, #8b5cf6);
         color: white;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        box-shadow: 0 2px 4px rgba(59, 130, 246, 0.2);
     }
     
     .analysis-badge {
@@ -1192,21 +1195,33 @@ def inject_css():
         background: linear-gradient(135deg, #f59e0b, #d97706);
     }
     
+    /* 文档卡片 - 白色背景，浅灰色边框 */
     .doc-card {
-        background: rgba(30, 41, 59, 0.8);
+        background: #ffffff;
         padding: 1.5rem;
         border-radius: 12px;
-        border: 1px solid rgba(148, 163, 184, 0.2);
+        border: 1px solid #e2e8f0;
         margin-bottom: 1rem;
         transition: all 0.3s ease;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     }
     
     .doc-card:hover {
         border-color: #3b82f6;
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
         transform: translateY(-2px);
     }
     
+    /* 文字颜色 - 深色以确保可读性 */
+    .doc-card h3 {
+        color: #1e293b;
+    }
+    
+    .doc-card p {
+        color: #475569;
+    }
+    
+    /* 按钮样式 */
     .stButton > button {
         border-radius: 8px;
         font-weight: 600;
@@ -1215,12 +1230,79 @@ def inject_css():
     
     .stButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
+    }
+    
+    /* 侧边栏 - 浅灰色背景 */
+    [data-testid="stSidebar"] {
+        background-color: #f8fafc;
+    }
+    
+    /* 提高文字可读性 */
+    .stMarkdown {
+        color: #1e293b;
+    }
+    
+    /* 标签页样式 */
+    .stTabs [data-baseweb="tab-list"] {
+        background-color: #f1f5f9;
+        border-radius: 8px;
+        padding: 0.5rem;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        color: #475569;
+        font-weight: 600;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        color: #3b82f6;
+    }
+    
+    /* 输入框样式优化 */
+    .stTextInput > div > div > input {
+        background-color: #ffffff;
+        border-color: #e2e8f0;
+    }
+    
+    /* 选择框样式 */
+    .stSelectbox > div > div {
+        background-color: #ffffff;
+    }
+    
+    /* 文件上传区域 */
+    [data-testid="stFileUploader"] {
+        background-color: #f8fafc;
+        border: 2px dashed #cbd5e1;
+        border-radius: 8px;
+    }
+    
+    /* 警告和信息框 */
+    .stAlert {
+        background-color: #ffffff;
+        border-left: 4px solid #3b82f6;
+    }
+    
+    /* 指标卡片 */
+    [data-testid="stMetricValue"] {
+        color: #1e293b;
+    }
+    
+    /* 展开器样式 */
+    .streamlit-expanderHeader {
+        background-color: #f8fafc;
+        color: #1e293b;
+        border-radius: 8px;
+    }
+    
+    /* 数据框样式 */
+    .dataframe {
+        background-color: #ffffff;
     }
     </style>
     """
     
-    st.markdown(dark_css, unsafe_allow_html=True)
+    st.markdown(light_css, unsafe_allow_html=True)
 
 def render_header():
     """Render application header"""
@@ -1420,12 +1502,9 @@ def extract_client_name(analysis: Dict) -> str:
     
     # 查找常见模式
     patterns = [
-        r'[Ii]nsured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
-,
-        r'[Cc]lient[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
-,
-        r'[Aa]ssured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)'
-,
+        r'[Ii]nsured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)',
+        r'[Cc]lient[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)',
+        r'[Aa]ssured[:\s]+([A-Z][A-Za-z\s&\.]+(?:Company|Corp|Ltd|Inc|LLC|S\.A\.)?)',
         r'MSC',
         r'Mediterranean Shipping Company'
     ]
